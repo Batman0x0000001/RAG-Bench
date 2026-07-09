@@ -1,0 +1,20 @@
+name: enterprise-rag-bench
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - langchain
+      - langchain-anthropic
+      - langchain-community
+      - langchain-core
+      - langchain-openai
+      - langchain-qdrant
+      - langgraph
+      - qdrant-client
+      - fastembed
+      - pydantic
+      - python-dotenv
+      - pyyaml
+      - pytest
