@@ -4,3 +4,4 @@ data/
 external/
 runs/
 __pycache__/
+.pytest*/

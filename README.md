@@ -72,6 +72,39 @@ python -m scripts.run_benchmark --mode graph --limit 5
 
 The benchmark output is written to `runs/<RUN_NAME>/answers.jsonl`.
 
+## Evaluation
+
+The local evaluation wrapper keeps the official benchmark repository unchanged.
+It filters the question set to GitHub, runs the official metrics evaluator, and
+then writes retrieval diagnostics and an incorrect-answer worklist.
+
+Configure the official judge first with `LLM_PROVIDER`, `LLM_API_KEY`,
+`LLM_MODEL_NAME`, and `CHEAP_LLM_MODEL_NAME`, then run from this project root:
+
+```bash
+python -m scripts.run_benchmark --question-source-type github
+python -m scripts.evaluate --source-type github --parallelism 3
+```
+
+On PowerShell, the evaluation variables can be loaded from the project `.env`
+into the current terminal before evaluation:
+
+```powershell
+. .\scripts\activate_eval_env.ps1
+python -m scripts.evaluate --source-type github --parallelism 1
+```
+
+The leading dot and space are required so the environment variables remain in
+the current PowerShell session.
+
+The run directory will contain `github_questions.jsonl`,
+`official_results.json`, `supplementary_metrics.json`, and
+`failed_questions.jsonl`. The default official run uses the original gold set.
+Use `--official-correction` only when the three-judge document correction flow
+is intentionally required, and `--resume` to continue an interrupted run.
+For a partial `answers.jsonl`, add `--only-answered` to evaluate exactly the
+question IDs present in that file.
+
 ## Index migration
 
 The standard Document manifest format is not compatible with manifests created

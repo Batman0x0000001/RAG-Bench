@@ -34,11 +34,13 @@ def append_retrieved_docs(
         "question_id": question_id,
         "documents": [
             {
+                "rank": rank,
                 "dsid": document.metadata.get("dsid"),
+                "chunk_id": document.metadata.get("chunk_id"),
                 "source_type": document.metadata.get("source_type"),
                 "relative_path": document.metadata.get("relative_path"),
             }
-            for document in documents
+            for rank, document in enumerate(documents, start=1)
         ],
     }
     with Path(retrieved_file).open("a", encoding="utf-8") as file:
