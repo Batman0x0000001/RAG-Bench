@@ -45,7 +45,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_tokens": 1024,
     },
     "retrieval": {
-        "top_k": 10,
+        "candidate_k": 40,
+        "candidate_documents": 12,
+        "max_documents": 8,
+        "chunks_per_document": 2,
+        "rerank_chunk_chars": 800,
+        "fallback_documents": 6,
+        "expanded_documents": 3,
+        "max_parent_chunks": 8,
     },
     "graph": {
         "max_steps": 3,

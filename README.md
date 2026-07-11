@@ -48,6 +48,14 @@ The ingestion pipeline follows LangChain's modular retrieval interfaces:
 `BaseLoader -> Document -> RecursiveCharacterTextSplitter -> QdrantVectorStore -> BaseRetriever`.
 Manifest rows use the standard document shape with `page_content` and `metadata`.
 
+Retrieval uses a two-stage document-ranking flow. Qdrant first returns a
+high-recall chunk candidate set, candidates are grouped by `dsid`, and the chat
+model ranks the candidate source documents before answer generation. Invalid
+reranker output falls back to similarity order. This adds one chat-model call
+per question. The highest-ranked source documents are then expanded from the
+local manifest so answer-bearing sections missed by chunk retrieval remain in
+the final context. This does not require a different manifest or vector collection.
+
 For GitHub PR JSON files, chunks are grouped by PR semantics instead of raw
 field names: `overview`, `description`, `discussion`, `release`, `changes`,
 `ci`, and `post_merge`. Short structured fields are folded into the overview or
