@@ -46,15 +46,20 @@ Ingestion writes a chunk-level manifest to
 `data/processed/github_documents.jsonl`: one source JSON file can produce
 multiple retrievable chunks, all sharing the same `dsid`.
 The ingestion pipeline follows LangChain's modular retrieval interfaces:
-`BaseLoader -> Document -> RecursiveCharacterTextSplitter -> QdrantVectorStore -> BaseRetriever`.
+`BaseLoader -> Document -> RecursiveCharacterTextSplitter -> QdrantVectorStore`.
+At query time, both Qdrant Dense search and the local BM25 index implement the
+standard `BaseRetriever` interface.
 Manifest rows use the standard document shape with `page_content` and `metadata`.
 
 Benchmark execution always uses one unified adaptive graph. LangChain components
 perform query planning, parallel `BaseRetriever.batch()` calls, prompt/model
-execution, and output parsing. LangGraph controls the state transitions:
-`plan -> retrieve -> RRF fuse -> rerank -> parent expand -> evidence check`.
+execution, and output parsing. Each planned query runs against Dense and BM25
+channels; chunk-level RRF combines those channels, then document-level RRF
+combines all query variants. LangGraph controls the state transitions:
+`plan -> hybrid retrieve -> query RRF -> rerank -> parent expand -> evidence check`.
 When evidence is incomplete, the graph performs one bounded follow-up retrieval
-round before answer generation. Document budgets adapt from small single-source
+round before answer generation. Follow-up queries use the same hybrid retriever.
+Document budgets adapt from small single-source
 queries to broad completeness queries. This does not require a different manifest
 or vector collection.
 
@@ -76,7 +81,30 @@ python -m scripts.run_benchmark --question-source-type github --limit 5
 
 The benchmark output is written to `runs/<RUN_NAME>/answers.jsonl`.
 Adaptive planning, executed queries, retrieval rounds, selected documents, and
-evidence checks are recorded in `runs/<RUN_NAME>/graph_traces.jsonl`.
+evidence checks are recorded in `runs/<RUN_NAME>/graph_traces.jsonl`. Each query
+candidate also records whether it came from `dense`, `bm25`, or both channels.
+The reranker receives document RRF rank, query-hit count, retrieval channels, and
+evidence-first excerpts. For single-document questions that explicitly request a
+wait-time value, HTTP status, size limit, or three named modes/settings, a narrow
+deterministic guard prevents a similar-looking document without that requested signal
+from replacing a candidate that contains direct evidence. Incidental phrases such as
+`time limit` do not trigger the wait-time rule. Named-enumeration evidence must also
+match the question topic near the enumeration, so unrelated component modes are ignored.
+`rerank_history` records the model's original choice,
+the final choice, its reason, and any guardrail decision for every retrieval round.
+The answer node receives the latest safe retrieval assessment, checks every comparison
+side and supported label, and permits only minimal inferences that follow directly from
+documented semantics. An overridden reranker reason is never passed to answer generation.
+
+The BM25 index is rebuilt in memory from the manifest when a benchmark process
+starts. It adds startup time but creates no persistent files and does not modify
+the existing Qdrant collection. To run a low-cost hybrid comparison first:
+
+```powershell
+$env:RUN_NAME = "12_generation_and_enum_fix_n10"
+python -m scripts.run_benchmark --question-source-type github --limit 10
+python -m scripts.evaluate --source-type github --parallelism 1 --only-answered
+```
 
 ## Evaluation
 

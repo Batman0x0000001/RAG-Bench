@@ -6,8 +6,12 @@ from pathlib import Path
 import pytest
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.retrievers import BaseRetriever
 
 from src.graphs.nodes import (
+    apply_direct_evidence_guardrail,
+    format_candidates,
+    format_retrieval_guidance,
     normalize_plan,
     parse_document_ids,
     prioritize_evidence_documents,
@@ -22,11 +26,13 @@ from src.ingestion.parse_documents import (
 )
 from src.indexing.qdrant_index import stable_document_ids
 from src.retrieval.vector_retriever import (
+    HybridCandidateRetriever,
     SimilarityCandidateRetriever,
     build_parent_document_store,
     expand_selected_documents,
     reciprocal_rank_fuse,
 )
+from src.retrieval.lexical_retriever import LocalBM25Retriever, tokenize_technical_text
 
 
 def test_loader_and_splitter_use_standard_documents(tmp_path: Path) -> None:
@@ -97,6 +103,69 @@ def test_similarity_candidate_retriever_uses_configured_k() -> None:
     assert store.call == {"query": "query", "k": 30}
 
 
+def test_technical_tokenizer_keeps_identifier_and_parts() -> None:
+    assert tokenize_technical_text("workspace_id v2.1") == [
+        "workspace_id",
+        "workspace",
+        "id",
+        "v2.1",
+        "v2",
+        "1",
+    ]
+
+
+def test_local_bm25_retrieves_exact_technical_identifier() -> None:
+    retriever = LocalBM25Retriever(
+        documents=[
+            Document(
+                page_content="The workspace_id controls tenant isolation.",
+                metadata={"dsid": "exact", "chunk_id": "exact::0"},
+            ),
+            Document(
+                page_content="Workspace setup and user permissions.",
+                metadata={"dsid": "broad", "chunk_id": "broad::0"},
+            ),
+        ],
+        k=2,
+    )
+
+    results = retriever.invoke("workspace_id")
+
+    assert results[0].metadata["dsid"] == "exact"
+    assert results[0].metadata["retrieval_channels"] == ["bm25"]
+
+
+def test_hybrid_retriever_fuses_dense_and_bm25_channels() -> None:
+    class StaticRetriever(BaseRetriever):
+        documents: list[Document]
+
+        def _get_relevant_documents(self, query: str, *, run_manager):
+            return self.documents
+
+    shared = Document(page_content="shared", metadata={"dsid": "a", "chunk_id": "a::0"})
+    dense_only = Document(
+        page_content="dense", metadata={"dsid": "b", "chunk_id": "b::0"}
+    )
+    bm25_only = Document(
+        page_content="bm25", metadata={"dsid": "c", "chunk_id": "c::0"}
+    )
+    retriever = HybridCandidateRetriever(
+        dense_retriever=StaticRetriever(documents=[dense_only, shared]),
+        bm25_retriever=StaticRetriever(documents=[bm25_only, shared]),
+        candidate_k=3,
+        rrf_k=60,
+    )
+
+    results = retriever.invoke("query")
+
+    assert results[0].metadata["dsid"] == "a"
+    assert results[0].metadata["retrieval_channels"] == ["dense", "bm25"]
+    assert results[0].metadata["retrieval_channel_ranks"] == {
+        "dense": 2,
+        "bm25": 2,
+    }
+
+
 def test_rrf_rewards_documents_retrieved_by_multiple_queries() -> None:
     a1 = Document(page_content="a1", metadata={"dsid": "a", "chunk_id": "a1"})
     a2 = Document(page_content="a2", metadata={"dsid": "a", "chunk_id": "a2"})
@@ -112,6 +181,176 @@ def test_rrf_rewards_documents_retrieved_by_multiple_queries() -> None:
 
     assert list(fused)[0] == "a"
     assert [document.page_content for document in fused["a"]] == ["a1", "a2"]
+    assert fused["a"][0].metadata["document_rrf_rank"] == 1
+    assert fused["a"][0].metadata["query_hit_count"] == 2
+
+
+def test_candidate_format_prioritizes_direct_time_evidence() -> None:
+    overview = Document(
+        page_content="General batching migration guidance.",
+        metadata={
+            "dsid": "a",
+            "document_rrf_rank": 1,
+            "query_hit_count": 2,
+            "retrieval_channels": ["dense"],
+        },
+    )
+    direct = Document(
+        page_content="Dedicated defaults to 10ms and Hosted defaults to 5ms.",
+        metadata={
+            "dsid": "a",
+            "document_rrf_rank": 1,
+            "query_hit_count": 2,
+            "retrieval_channels": ["bm25"],
+        },
+    )
+
+    formatted = format_candidates(
+        {"a": [overview, direct]},
+        chunk_chars=800,
+        question="What is the default wait time?",
+        requirements=["Compare Dedicated and Hosted"],
+    )
+
+    assert formatted.index("10ms") < formatted.index("General batching")
+    assert "Retrieval channels: bm25, dense" in formatted
+
+
+def test_direct_evidence_guardrail_recovers_time_value() -> None:
+    groups = {
+        "gold": [Document(page_content="Dedicated 10ms; Hosted 5ms.")],
+        "wrong": [Document(page_content="Migration from max_wait_ms.")],
+    }
+
+    selected, reason = apply_direct_evidence_guardrail(
+        "What is the default wait time for each tier?",
+        strategy="single",
+        budget=1,
+        groups=groups,
+        selected_ids=["wrong"],
+    )
+
+    assert selected == ["gold"]
+    assert reason == "direct_evidence:time_value"
+
+
+def test_time_limit_context_does_not_request_a_time_value() -> None:
+    groups = {
+        "gold": [Document(page_content="Added metric stream.timebox_finalized.")],
+        "wrong": [Document(page_content="The default timebox is 30 seconds.")],
+    }
+
+    selected, reason = apply_direct_evidence_guardrail(
+        "What is the metric name for sessions finalized due to the time limit?",
+        strategy="single",
+        budget=1,
+        groups=groups,
+        selected_ids=["gold"],
+    )
+
+    assert selected == ["gold"]
+    assert reason is None
+
+
+def test_direct_evidence_guardrail_recovers_three_named_modes() -> None:
+    groups = {
+        "selected": [Document(page_content="Preferred precision: fp32, bf16, int8.")],
+        "unrelated": [
+            Document(
+                page_content=(
+                    "KVPrefetchAdapter supports three modes: exact-layout, "
+                    "dequant-inline, and universal."
+                )
+            )
+        ],
+        "gold": [
+            Document(
+                page_content=(
+                    "The runtime precision toggle has three modes: strict (fp32), "
+                    "balanced (fp16 with validators), and aggressive (fp16/int8 "
+                    "once warmed)."
+                )
+            )
+        ],
+    }
+
+    selected, reason = apply_direct_evidence_guardrail(
+        "What are the three runtime precision settings and what does each allow?",
+        strategy="single",
+        budget=1,
+        groups=groups,
+        selected_ids=["selected"],
+    )
+
+    assert selected == ["gold"]
+    assert reason == "direct_evidence:three_item_enumeration"
+
+
+def test_retrieval_guidance_drops_overridden_llm_reason() -> None:
+    guidance = format_retrieval_guidance(
+        {
+            "rerank_history": [
+                {
+                    "selection_reason": "The wrong tolerant-schema document is best.",
+                    "guardrail_reason": "direct_evidence:http_status",
+                }
+            ]
+        }
+    )
+
+    assert "wrong tolerant-schema" not in guidance
+    assert "http_status" in guidance
+
+
+def test_retrieval_guidance_keeps_unoverridden_reason() -> None:
+    guidance = format_retrieval_guidance(
+        {
+            "rerank_history": [
+                {
+                    "selection_reason": "Both omitted and unset values use defaults.",
+                    "guardrail_reason": None,
+                }
+            ]
+        }
+    )
+
+    assert guidance == "Both omitted and unset values use defaults."
+
+
+def test_direct_evidence_guardrail_requires_http_context() -> None:
+    groups = {
+        "gold": [Document(page_content="We return a 422 structured error payload.")],
+        "wrong": [Document(page_content="612 additions and 174 deletions.")],
+    }
+
+    selected, reason = apply_direct_evidence_guardrail(
+        "What HTTP status does schema validation return?",
+        strategy="single",
+        budget=1,
+        groups=groups,
+        selected_ids=["wrong"],
+    )
+
+    assert selected == ["gold"]
+    assert reason == "direct_evidence:http_status"
+
+
+def test_direct_evidence_guardrail_does_not_override_semantic_strategy() -> None:
+    groups = {
+        "gold": [Document(page_content="We return HTTP status 422.")],
+        "selected": [Document(page_content="Schema validation behavior.")],
+    }
+
+    selected, reason = apply_direct_evidence_guardrail(
+        "What HTTP status does validation return?",
+        strategy="semantic",
+        budget=1,
+        groups=groups,
+        selected_ids=["selected"],
+    )
+
+    assert selected == ["selected"]
+    assert reason is None
 
 
 def test_normalize_plan_applies_adaptive_budget_and_keeps_original_query() -> None:

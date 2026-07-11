@@ -45,7 +45,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_tokens": 1024,
     },
     "retrieval": {
-        "candidate_k": 30,
+        "dense_candidate_k": 30,
+        "bm25_candidate_k": 30,
+        "hybrid_candidate_k": 40,
+        "channel_rrf_k": 60,
         "max_queries": 5,
         "query_parallelism": 3,
         "rrf_k": 60,

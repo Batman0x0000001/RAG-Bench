@@ -9,6 +9,8 @@ from langchain_core.retrievers import BaseRetriever
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 
+from src.retrieval.lexical_retriever import build_bm25_retriever
+
 
 class SimilarityCandidateRetriever(BaseRetriever):
     """只负责高召回候选检索，规划、融合和重排由 LangGraph 编排。"""
@@ -17,7 +19,66 @@ class SimilarityCandidateRetriever(BaseRetriever):
     candidate_k: int = 30
 
     def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
-        return self.vector_store.similarity_search(query, k=self.candidate_k)
+        documents = self.vector_store.similarity_search(query, k=self.candidate_k)
+        return [
+            Document(
+                page_content=document.page_content,
+                metadata={
+                    **document.metadata,
+                    "retrieval_channels": ["dense"],
+                    "dense_rank": rank,
+                },
+            )
+            for rank, document in enumerate(documents, start=1)
+        ]
+
+
+class HybridCandidateRetriever(BaseRetriever):
+    """对 Dense 与 BM25 两路标准检索器执行 chunk 级 RRF。"""
+
+    dense_retriever: BaseRetriever
+    bm25_retriever: BaseRetriever
+    candidate_k: int = 40
+    rrf_k: int = 60
+
+    def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
+        channel_results = {
+            "dense": self.dense_retriever.invoke(
+                query, config={"callbacks": run_manager.get_child()}
+            ),
+            "bm25": self.bm25_retriever.invoke(
+                query, config={"callbacks": run_manager.get_child()}
+            ),
+        }
+        scores: dict[str, float] = defaultdict(float)
+        documents: dict[str, Document] = {}
+        channels: dict[str, list[str]] = defaultdict(list)
+        channel_ranks: dict[str, dict[str, int]] = defaultdict(dict)
+
+        for channel, results in channel_results.items():
+            for rank, document in enumerate(results, start=1):
+                chunk_id = str(
+                    document.metadata.get("chunk_id")
+                    or f"{document.metadata.get('dsid', '')}::{document.page_content}"
+                )
+                scores[chunk_id] += 1.0 / (self.rrf_k + rank)
+                documents.setdefault(chunk_id, document)
+                channels[chunk_id].append(channel)
+                channel_ranks[chunk_id][channel] = rank
+
+        ordered_ids = sorted(scores, key=scores.get, reverse=True)[: self.candidate_k]
+        return [
+            Document(
+                page_content=documents[chunk_id].page_content,
+                metadata={
+                    **documents[chunk_id].metadata,
+                    "retrieval_channels": channels[chunk_id],
+                    "retrieval_channel_ranks": channel_ranks[chunk_id],
+                    "hybrid_rrf_score": scores[chunk_id],
+                },
+            )
+            for chunk_id in ordered_ids
+        ]
 
 
 def reciprocal_rank_fuse(
@@ -28,6 +89,7 @@ def reciprocal_rank_fuse(
 ) -> dict[str, list[Document]]:
     """按文档执行 RRF；同一查询中的重复 chunk 只贡献该文档的最佳排名。"""
     scores: dict[str, float] = defaultdict(float)
+    query_hits: dict[str, int] = defaultdict(int)
     chunks: dict[str, list[Document]] = defaultdict(list)
     seen_chunks: dict[str, set[str]] = defaultdict(set)
 
@@ -47,9 +109,24 @@ def reciprocal_rank_fuse(
                 chunks[dsid].append(document)
         for dsid, rank in best_rank.items():
             scores[dsid] += 1.0 / (rrf_k + rank)
+            query_hits[dsid] += 1
 
     ordered_ids = sorted(scores, key=lambda dsid: scores[dsid], reverse=True)
-    return {dsid: chunks[dsid] for dsid in ordered_ids[:max_documents]}
+    groups: dict[str, list[Document]] = {}
+    for document_rank, dsid in enumerate(ordered_ids[:max_documents], start=1):
+        groups[dsid] = [
+            Document(
+                page_content=document.page_content,
+                metadata={
+                    **document.metadata,
+                    "document_rrf_rank": document_rank,
+                    "document_rrf_score": scores[dsid],
+                    "query_hit_count": query_hits[dsid],
+                },
+            )
+            for document in chunks[dsid]
+        ]
+    return groups
 
 
 def build_parent_document_store(
@@ -118,4 +195,25 @@ def build_candidate_retriever(
     return SimilarityCandidateRetriever(
         vector_store=build_vector_store(qdrant_config, embeddings),
         candidate_k=candidate_k,
+    )
+
+
+def build_hybrid_candidate_retriever(
+    qdrant_config: dict[str, Any],
+    embeddings: Embeddings,
+    documents: list[Document],
+    dense_k: int = 30,
+    bm25_k: int = 30,
+    candidate_k: int = 40,
+    rrf_k: int = 60,
+) -> BaseRetriever:
+    return HybridCandidateRetriever(
+        dense_retriever=build_candidate_retriever(
+            qdrant_config,
+            embeddings,
+            candidate_k=dense_k,
+        ),
+        bm25_retriever=build_bm25_retriever(documents, k=bm25_k),
+        candidate_k=candidate_k,
+        rrf_k=rrf_k,
     )

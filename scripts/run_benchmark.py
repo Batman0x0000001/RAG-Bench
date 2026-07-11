@@ -15,7 +15,7 @@ from src.graphs.rag_graph import build_adaptive_rag_graph
 from src.ingestion.parse_documents import read_manifest
 from src.retrieval.embeddings import build_embeddings
 from src.retrieval.vector_retriever import (
-    build_candidate_retriever,
+    build_hybrid_candidate_retriever,
     build_parent_document_store,
 )
 from src.utils.config import load_config
@@ -73,19 +73,25 @@ def main() -> None:
 
     embeddings = build_embeddings(config["embedding"])
     llm = build_chat_model(config["llm"])
-    parent_documents = build_parent_document_store(
-        read_manifest(config["data"]["manifest_file"])
-    )
-    retriever = build_candidate_retriever(
+    manifest_documents = read_manifest(config["data"]["manifest_file"])
+    parent_documents = build_parent_document_store(manifest_documents)
+    retrieval_config = config["retrieval"]
+    logging.info("Building local BM25 index from %d chunks", len(manifest_documents))
+    retriever = build_hybrid_candidate_retriever(
         config["qdrant"],
         embeddings,
-        candidate_k=int(config["retrieval"].get("candidate_k", 30)),
+        manifest_documents,
+        dense_k=int(retrieval_config.get("dense_candidate_k", 30)),
+        bm25_k=int(retrieval_config.get("bm25_candidate_k", 30)),
+        candidate_k=int(retrieval_config.get("hybrid_candidate_k", 40)),
+        rrf_k=int(retrieval_config.get("channel_rrf_k", 60)),
     )
+    logging.info("Local BM25 index is ready")
     graph = build_adaptive_rag_graph(
         retriever,
         llm,
         parent_documents,
-        config["retrieval"],
+        retrieval_config,
     )
 
     answers_file = run_dir / "answers.jsonl"

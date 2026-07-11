@@ -61,6 +61,7 @@ def append_graph_trace(
         "retrieval_round": state.get("retrieval_round", 0),
         "selected_document_ids": state.get("selected_document_ids", []),
         "candidate_document_ids": list(state.get("candidate_groups", {})),
+        "rerank_history": state.get("rerank_history", []),
         "query_candidates": [
             {
                 "query": query,
@@ -71,6 +72,23 @@ def append_graph_trace(
                         if document.metadata.get("dsid")
                     )
                 ),
+                "channels_by_document": {
+                    dsid: sorted(
+                        {
+                            channel
+                            for document in documents
+                            if str(document.metadata.get("dsid")) == dsid
+                            for channel in document.metadata.get(
+                                "retrieval_channels", []
+                            )
+                        }
+                    )
+                    for dsid in dict.fromkeys(
+                        str(document.metadata.get("dsid"))
+                        for document in documents
+                        if document.metadata.get("dsid")
+                    )
+                },
             }
             for query, documents in zip(
                 state.get("executed_queries", []),
