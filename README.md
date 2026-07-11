@@ -3,8 +3,9 @@
 This project is a resume-friendly RAG benchmark scaffold for
 [EnterpriseRAG-Bench](https://github.com/onyx-dot-app/EnterpriseRAG-Bench).
 It uses Qdrant for vector search, SiliconFlow for OpenAI-compatible embeddings,
-DeepSeek's Anthropic-compatible API for answer generation, LangChain for the
-minimal RAG chain, and LangGraph for workflow orchestration.
+DeepSeek's Anthropic-compatible API for reasoning and answer generation,
+LangChain for standard retrieval/model/prompt components, and LangGraph for
+adaptive workflow orchestration.
 
 ## Setup
 
@@ -48,13 +49,14 @@ The ingestion pipeline follows LangChain's modular retrieval interfaces:
 `BaseLoader -> Document -> RecursiveCharacterTextSplitter -> QdrantVectorStore -> BaseRetriever`.
 Manifest rows use the standard document shape with `page_content` and `metadata`.
 
-Retrieval uses a two-stage document-ranking flow. Qdrant first returns a
-high-recall chunk candidate set, candidates are grouped by `dsid`, and the chat
-model ranks the candidate source documents before answer generation. Invalid
-reranker output falls back to similarity order. This adds one chat-model call
-per question. The highest-ranked source documents are then expanded from the
-local manifest so answer-bearing sections missed by chunk retrieval remain in
-the final context. This does not require a different manifest or vector collection.
+Benchmark execution always uses one unified adaptive graph. LangChain components
+perform query planning, parallel `BaseRetriever.batch()` calls, prompt/model
+execution, and output parsing. LangGraph controls the state transitions:
+`plan -> retrieve -> RRF fuse -> rerank -> parent expand -> evidence check`.
+When evidence is incomplete, the graph performs one bounded follow-up retrieval
+round before answer generation. Document budgets adapt from small single-source
+queries to broad completeness queries. This does not require a different manifest
+or vector collection.
 
 For GitHub PR JSON files, chunks are grouped by PR semantics instead of raw
 field names: `overview`, `description`, `discussion`, `release`, `changes`,
@@ -72,13 +74,9 @@ python -m scripts.ingest --path github/some_file.json
 python -m scripts.run_benchmark --question-source-type github --limit 5
 ```
 
-Use LangGraph mode when you want to exercise the graph workflow:
-
-```bash
-python -m scripts.run_benchmark --mode graph --limit 5
-```
-
 The benchmark output is written to `runs/<RUN_NAME>/answers.jsonl`.
+Adaptive planning, executed queries, retrieval rounds, selected documents, and
+evidence checks are recorded in `runs/<RUN_NAME>/graph_traces.jsonl`.
 
 ## Evaluation
 
@@ -130,9 +128,6 @@ from each chunk's `chunk_id`.
 
 ## Notes
 
-- The first version intentionally keeps the graph simple:
-  `Start -> Retrieve -> Generate Answer -> Final`.
-- Core modules include Chinese comments for learning-oriented readability.
 - SiliconFlow embedding model defaults to `Qwen/Qwen3-Embedding-0.6B`, with
   `EMBEDDING_VECTOR_SIZE=1024`. If you change the embedding model, update the
   vector size and recreate the Qdrant collection.

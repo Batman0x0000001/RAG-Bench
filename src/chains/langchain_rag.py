@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.retrievers import BaseRetriever
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 
 ANSWER_PROMPT = ChatPromptTemplate.from_messages(
@@ -17,21 +13,18 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages(
         (
             "system",
             "You are an enterprise RAG assistant. Answer only from the provided context. "
-            "If the context is insufficient, say that the answer is not available in the documents.",
+            "Cover every stated requirement with all explicit qualifiers, names, numbers, "
+            "versions, labels, and exceptions supported by the evidence. Resolve old/new or "
+            "conflicting information explicitly. If evidence is insufficient, identify what "
+            "is unavailable instead of inventing it.",
         ),
         (
             "human",
-            "Question:\n{question}\n\nContext:\n{context}\n\nAnswer clearly and cite no external knowledge.",
+            "Question:\n{question}\n\nRequired coverage:\n{requirements}\n\n"
+            "Context:\n{context}\n\nAnswer clearly and cite no external knowledge.",
         ),
     ]
 )
-
-
-@dataclass(frozen=True)
-class RagResult:
-    answer: str
-    document_ids: list[str]
-    documents: list[Document]
 
 
 def build_chat_model(llm_config: dict[str, Any]) -> BaseChatModel:
@@ -64,35 +57,3 @@ def format_context(documents: list[Document]) -> str:
             f"{document.page_content}"
         )
     return "\n\n---\n\n".join(chunks)
-
-
-def extract_document_ids(documents: list[Document]) -> list[str]:
-    ids: list[str] = []
-    for document in documents:
-        dsid = document.metadata.get("dsid")
-        if dsid and dsid not in ids:
-            ids.append(str(dsid))
-    return ids
-
-
-def answer_with_retriever(
-    question: str,
-    retriever: BaseRetriever,
-    llm: BaseChatModel,
-) -> RagResult:
-    documents = retriever.invoke(question)
-    chain = (
-        {
-            "question": RunnablePassthrough(),
-            "context": RunnableLambda(lambda _: format_context(documents)),
-        }
-        | ANSWER_PROMPT
-        | llm
-        | StrOutputParser()
-    )
-    answer = chain.invoke(question)
-    return RagResult(
-        answer=answer,
-        document_ids=extract_document_ids(documents),
-        documents=documents,
-    )
