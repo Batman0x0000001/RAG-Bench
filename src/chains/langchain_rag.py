@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
+from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
+from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 
@@ -32,7 +34,7 @@ class RagResult:
     documents: list[Document]
 
 
-def build_chat_model(llm_config: dict[str, Any]) -> ChatAnthropic:
+def build_chat_model(llm_config: dict[str, Any]) -> BaseChatModel:
     provider = llm_config.get("provider", "anthropic_compatible")
     if provider not in {"anthropic", "anthropic_compatible", "deepseek"}:
         raise ValueError(f"Unsupported LLM provider: {provider}")
@@ -40,10 +42,11 @@ def build_chat_model(llm_config: dict[str, Any]) -> ChatAnthropic:
     # DeepSeek 的 Anthropic-compatible API 使用 ChatAnthropic，但需要显式传入 base url 和 key。
     api_key = llm_config.get("api_key") or None
     base_url = llm_config.get("base_url") or None
-    return ChatAnthropic(
+    return init_chat_model(
         model=llm_config["model"],
-        anthropic_api_key=api_key,
-        anthropic_api_url=base_url,
+        model_provider="anthropic",
+        api_key=api_key,
+        base_url=base_url,
         temperature=float(llm_config.get("temperature", 0.0)),
         max_tokens=int(llm_config.get("max_tokens", 1024)),
     )
@@ -72,7 +75,11 @@ def extract_document_ids(documents: list[Document]) -> list[str]:
     return ids
 
 
-def answer_with_retriever(question: str, retriever: Any, llm: ChatAnthropic) -> RagResult:
+def answer_with_retriever(
+    question: str,
+    retriever: BaseRetriever,
+    llm: BaseChatModel,
+) -> RagResult:
     documents = retriever.invoke(question)
     chain = (
         {

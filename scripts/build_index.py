@@ -20,8 +20,7 @@ def main() -> None:
 
     setup_logging()
     config = load_config(args.config)
-    parsed_documents = read_manifest(config["data"]["manifest_file"], limit=args.limit)
-    documents = [document.to_langchain_document() for document in parsed_documents]
+    documents = read_manifest(config["data"]["manifest_file"], limit=args.limit)
 
     embeddings = build_embeddings(config["embedding"])
     if not args.no_recreate:

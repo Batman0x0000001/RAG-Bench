@@ -45,7 +45,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_tokens": 1024,
     },
     "retrieval": {
-        "top_k": 50,
+        "top_k": 5,
     },
     "graph": {
         "max_steps": 3,

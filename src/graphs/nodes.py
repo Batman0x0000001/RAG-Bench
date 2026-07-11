@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import TypedDict
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.documents import Document
+from langchain_core.language_models import BaseChatModel
+from langchain_core.retrievers import BaseRetriever
 
 from src.chains.langchain_rag import ANSWER_PROMPT, extract_document_ids, format_context
 from langchain_core.output_parsers import StrOutputParser
@@ -17,7 +18,7 @@ class RagState(TypedDict, total=False):
     step_count: int
 
 
-def retrieve_node(retriever: Any):
+def retrieve_node(retriever: BaseRetriever):
     def _node(state: RagState) -> RagState:
         # 检索节点只负责找证据，不生成答案；这样后续可以替换成多路检索或混合检索。
         question = state["question"]
@@ -32,7 +33,7 @@ def retrieve_node(retriever: Any):
     return _node
 
 
-def generate_answer_node(llm: ChatAnthropic):
+def generate_answer_node(llm: BaseChatModel):
     def _node(state: RagState) -> RagState:
         # 生成节点只消费已检索文档，保持答案生成和检索逻辑解耦。
         prompt_value = ANSWER_PROMPT.invoke(

@@ -9,12 +9,6 @@ def build_embeddings(config: dict[str, Any]) -> Embeddings:
     provider = config.get("provider", "openai_compatible")
     model = config.get("model", "BAAI/bge-m3")
 
-    if provider == "fastembed":
-        # 本地 embedding，适合没有外部 API key 时快速跑通索引流程。
-        from langchain_community.embeddings import FastEmbedEmbeddings
-
-        return FastEmbedEmbeddings(model_name=model)
-
     if provider in {"openai", "openai_compatible", "siliconflow"}:
         # SiliconFlow 的 embedding API 兼容 OpenAI 格式，因此复用 LangChain 的 OpenAIEmbeddings。
         from langchain_openai import OpenAIEmbeddings
@@ -28,6 +22,8 @@ def build_embeddings(config: dict[str, Any]) -> Embeddings:
             model=model,
             api_key=api_key,
             base_url=base_url,
+            # OpenAI-compatible 服务应让服务端使用目标模型自己的 tokenizer。
+            check_embedding_ctx_length=False,
         )
 
     raise ValueError(f"Unsupported embedding provider: {provider}")

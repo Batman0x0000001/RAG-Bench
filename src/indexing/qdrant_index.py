@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -9,11 +10,21 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
 
 
+def stable_document_ids(documents: list[Document]) -> list[str]:
+    return [
+        str(uuid5(NAMESPACE_URL, str(document.metadata["chunk_id"])))
+        for document in documents
+    ]
+
+
 def recreate_collection(config: dict[str, Any]) -> None:
     client = QdrantClient(url=config["url"], api_key=config.get("api_key") or None)
     distance = Distance[config.get("distance", "Cosine").upper()]
-    client.recreate_collection(
-        collection_name=config["collection"],
+    collection_name = config["collection"]
+    if client.collection_exists(collection_name):
+        client.delete_collection(collection_name)
+    client.create_collection(
+        collection_name=collection_name,
         vectors_config=VectorParams(
             size=int(config.get("vector_size", 1024)),
             distance=distance,
@@ -35,4 +46,5 @@ def index_documents(
         embedding=embeddings,
     )
     for start in range(0, len(documents), batch_size):
-        vector_store.add_documents(documents[start : start + batch_size])
+        batch = documents[start : start + batch_size]
+        vector_store.add_documents(batch, ids=stable_document_ids(batch))

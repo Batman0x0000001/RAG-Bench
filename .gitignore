@@ -3,3 +3,4 @@
 data/
 external/
 runs/
+__pycache__/

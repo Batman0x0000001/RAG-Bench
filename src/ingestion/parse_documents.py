@@ -4,11 +4,12 @@ import json
 import re
 import zipfile
 from collections import Counter
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
+from langchain_core.document_loaders import BaseLoader
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 DSID_PATTERN = re.compile(r"(dsid_[A-Za-z0-9]+)")
@@ -144,33 +145,35 @@ OVERVIEW_KEYS = [
 ]
 
 
-@dataclass(frozen=True)
-class ParsedDocument:
-    dsid: str
-    source_type: str
-    relative_path: str
-    filename: str
-    content: str
-    chunk_id: str = ""
-    field_name: str = ""
-    chunk_index: int = 0
-    metadata: dict[str, Any] = field(default_factory=dict)
+class EnterpriseRagLoader(BaseLoader):
+    """将 EnterpriseRAG-Bench 源文件加载为标准 LangChain Document。"""
 
-    def to_langchain_document(self) -> Document:
-        # 这些顶层标识进入 LangChain 后都会成为 metadata，便于过滤、溯源和输出 document_ids。
-        base_metadata = {
-            "dsid": self.dsid,
-            "chunk_id": self.chunk_id,
-            "source_type": self.source_type,
-            "relative_path": self.relative_path,
-            "filename": self.filename,
-            "field_name": self.field_name,
-            "chunk_index": self.chunk_index,
-        }
-        return Document(
-            page_content=self.content,
-            metadata={**base_metadata, **self.metadata},
-        )
+    def __init__(
+        self,
+        path: str | Path,
+        documents_dir: str | Path,
+        source_type_hint: str = "github",
+    ) -> None:
+        self.path = Path(path)
+        self.documents_dir = Path(documents_dir)
+        self.source_type_hint = source_type_hint
+
+    def lazy_load(self) -> Iterator[Document]:
+        if self.path.suffix.lower() == ".json":
+            yield from _load_json_documents(
+                self.path,
+                self.documents_dir,
+                self.source_type_hint,
+            )
+            return
+        if self.path.suffix.lower() == ".txt":
+            yield _load_text_document(
+                self.path,
+                self.documents_dir,
+                self.source_type_hint,
+            )
+            return
+        raise ValueError(f"Unsupported document file type: {self.path}")
 
 
 def parse_dsid_from_filename(filename: str) -> str:
@@ -299,55 +302,6 @@ def _content_field_names(doc: dict[str, Any], title_field: str) -> list[str]:
     return fields
 
 
-def _split_with_overlap(
-    text: str,
-    max_chars: int,
-    overlap_chars: int,
-) -> list[str]:
-    text = text.strip()
-    if len(text) <= max_chars:
-        return [text] if text else []
-
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + max_chars, len(text))
-        if end < len(text):
-            boundary = max(text.rfind("\n\n", start, end), text.rfind("\n", start, end))
-            if boundary > start + max_chars // 2:
-                end = boundary
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end >= len(text):
-            break
-        start = max(end - overlap_chars, start + 1)
-    return chunks
-
-
-def _split_items(items: list[str], max_chars: int, overlap_items: int = 0) -> list[str]:
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-    for item in items:
-        item = item.strip()
-        if not item:
-            continue
-        item_len = len(item) + 2
-        if current and current_len + item_len > max_chars:
-            chunks.append("\n\n".join(current))
-            current = current[-overlap_items:] if overlap_items else []
-            current_len = sum(len(existing) + 2 for existing in current)
-        if item_len > max_chars:
-            chunks.extend(_split_with_overlap(item, max_chars=max_chars, overlap_chars=200))
-            continue
-        current.append(item)
-        current_len += item_len
-    if current:
-        chunks.append("\n\n".join(current))
-    return chunks
-
-
 def _field_to_items(field_name: str, value: Any) -> list[str]:
     if isinstance(value, list):
         return [f"{field_name}:\n{_format_value(item)}" for item in value]
@@ -390,31 +344,13 @@ def _collect_sections(doc: dict[str, Any], title_field: str) -> dict[str, dict[s
     return sections
 
 
-def _section_chunks(section: str, items: list[str]) -> list[str]:
-    text = "\n\n".join(item for item in items if item.strip()).strip()
-    if not text:
-        return []
-
-    if section == "description":
-        return _split_with_overlap(text, max_chars=4_500, overlap_chars=500)
-    if section == "discussion":
-        return _split_items(items, max_chars=4_500, overlap_items=1)
-    if section == "release":
-        return _split_with_overlap(text, max_chars=3_800, overlap_chars=200)
-    if section == "changes":
-        return _split_items(items, max_chars=3_800, overlap_items=0)
-    if section in {"overview", "ci", "post_merge"}:
-        return [text]
-    return _split_with_overlap(text, max_chars=3_800, overlap_chars=200)
-
-
-def _json_chunks(
+def _json_documents(
     doc: dict[str, Any],
     dsid: str,
     source_type: str,
     relative_path: Path,
     filename: str,
-) -> list[ParsedDocument]:
+) -> list[Document]:
     title_field, title = _title(doc)
     base_metadata = {
         **_simple_metadata(doc),
@@ -423,49 +359,39 @@ def _json_chunks(
         "title_field_name": title_field,
     }
     sections = _collect_sections(doc, title_field)
-    chunks: list[ParsedDocument] = []
+    documents: list[Document] = []
 
     for section, section_data in sections.items():
         field_names = list(dict.fromkeys(section_data["field_names"]))
-        for section_chunk_index, chunk_text in enumerate(
-            _section_chunks(section, section_data["items"])
-        ):
-            global_chunk_index = len(chunks)
-            chunk_id = f"{dsid}::{section}::{section_chunk_index}"
-            # header 只保留轻量 PR 上下文；正文片段放在 section body。
-            content = (
-                f"{_header(doc, section)}\n\n"
-                f"Section: {section}\n"
-                f"Chunk: {section_chunk_index}\n\n"
-                f"{chunk_text}"
+        section_text = "\n\n".join(
+            item for item in section_data["items"] if item.strip()
+        ).strip()
+        if not section_text:
+            continue
+        documents.append(
+            Document(
+                page_content=section_text,
+                metadata={
+                    **base_metadata,
+                    "dsid": dsid,
+                    "source_type": source_type,
+                    "relative_path": relative_path.as_posix(),
+                    "filename": filename,
+                    "field_name": section,
+                    "section": section,
+                    "field_names": field_names,
+                    "context_header": _header(doc, section),
+                },
             )
-            chunks.append(
-                ParsedDocument(
-                    dsid=dsid,
-                    source_type=source_type,
-                    relative_path=relative_path.as_posix(),
-                    filename=filename,
-                    content=content,
-                    chunk_id=chunk_id,
-                    field_name=section,
-                    chunk_index=global_chunk_index,
-                    metadata={
-                        **base_metadata,
-                        "section": section,
-                        "field_names": field_names,
-                        "chunk_field_index": section_chunk_index,
-                        "content_chars": len(chunk_text),
-                    },
-                )
-            )
-    return chunks
+        )
+    return documents
 
 
-def parse_json_document_file(
+def _load_json_documents(
     path: Path,
     documents_dir: Path,
     source_type_hint: str = "github",
-) -> list[ParsedDocument]:
+) -> list[Document]:
     relative_path = _relative_path(path, documents_dir)
     parsed_source_type = parse_source_type(relative_path)
     source_type = parsed_source_type if parsed_source_type != "unknown" else source_type_hint
@@ -478,56 +404,81 @@ def parse_json_document_file(
     if not isinstance(dsid, str):
         raise ValueError(f"dataset_doc_uuid must be a string: {path}")
 
-    return _json_chunks(doc, dsid, source_type, relative_path, path.name)
+    return _json_documents(doc, dsid, source_type, relative_path, path.name)
 
 
-def parse_text_document_file(
+def _load_text_document(
     path: Path,
     documents_dir: Path,
     source_type_hint: str = "github",
-) -> list[ParsedDocument]:
+) -> Document:
     relative_path = _relative_path(path, documents_dir)
     parsed_source_type = parse_source_type(relative_path)
     source_type = parsed_source_type if parsed_source_type != "unknown" else source_type_hint
     content = path.read_text(encoding="utf-8", errors="replace").strip()
     dsid = parse_dsid_from_filename(path.name)
-    chunks = []
-    for chunk_index, chunk_text in enumerate(
-        _split_with_overlap(content, max_chars=3_800, overlap_chars=200)
-    ):
-        chunks.append(
-            ParsedDocument(
-                dsid=dsid,
-                source_type=source_type,
-                relative_path=relative_path.as_posix(),
-                filename=path.name,
-                content=chunk_text,
-                chunk_id=f"{dsid}::text::{chunk_index}",
-                field_name="text",
-                chunk_index=chunk_index,
-                metadata={
-                    "raw_format": "txt",
-                    "parent_doc_id": dsid,
-                    "section": "text",
-                    "field_names": ["text"],
-                    "chunk_field_index": chunk_index,
-                    "content_chars": len(chunk_text),
-                },
-            )
-        )
-    return chunks
+    return Document(
+        page_content=content,
+        metadata={
+            "dsid": dsid,
+            "source_type": source_type,
+            "relative_path": relative_path.as_posix(),
+            "filename": path.name,
+            "field_name": "text",
+            "raw_format": "txt",
+            "parent_doc_id": dsid,
+            "section": "text",
+            "field_names": ["text"],
+        },
+    )
 
 
 def parse_document_file(
     path: Path,
     documents_dir: Path,
     source_type_hint: str = "github",
-) -> list[ParsedDocument]:
-    if path.suffix.lower() == ".json":
-        return parse_json_document_file(path, documents_dir, source_type_hint)
-    if path.suffix.lower() == ".txt":
-        return parse_text_document_file(path, documents_dir, source_type_hint)
-    raise ValueError(f"Unsupported document file type: {path}")
+) -> list[Document]:
+    return EnterpriseRagLoader(path, documents_dir, source_type_hint).load()
+
+
+def split_documents(documents: Iterable[Document]) -> list[Document]:
+    """按语义分区选择参数，并通过官方 TextSplitter API 生成可检索块。"""
+    splitters = {
+        "description": RecursiveCharacterTextSplitter(chunk_size=4_500, chunk_overlap=500),
+        "discussion": RecursiveCharacterTextSplitter(chunk_size=4_500, chunk_overlap=300),
+        "release": RecursiveCharacterTextSplitter(chunk_size=3_800, chunk_overlap=200),
+        "changes": RecursiveCharacterTextSplitter(chunk_size=3_800, chunk_overlap=0),
+        "text": RecursiveCharacterTextSplitter(chunk_size=3_800, chunk_overlap=200),
+    }
+    default_splitter = RecursiveCharacterTextSplitter(chunk_size=3_800, chunk_overlap=200)
+    chunks: list[Document] = []
+    section_counts: Counter[tuple[str, str]] = Counter()
+    for document in documents:
+        section = str(document.metadata.get("section", "text"))
+        splitter = splitters.get(section, default_splitter)
+        for chunk in splitter.split_documents([document]):
+            dsid = str(chunk.metadata["dsid"])
+            key = (dsid, section)
+            section_index = section_counts[key]
+            section_counts[key] += 1
+            chunk.metadata.update(
+                {
+                    "chunk_id": f"{dsid}::{section}::{section_index}",
+                    "chunk_index": len(chunks),
+                    "chunk_field_index": section_index,
+                    "content_chars": len(chunk.page_content),
+                }
+            )
+            context_header = chunk.metadata.get("context_header")
+            if context_header:
+                chunk.page_content = (
+                    f"{context_header}\n\n"
+                    f"Section: {section}\n"
+                    f"Chunk: {section_index}\n\n"
+                    f"{chunk.page_content}"
+                )
+            chunks.append(chunk)
+    return chunks
 
 
 def parse_documents(
@@ -536,24 +487,24 @@ def parse_documents(
     path: str | Path | None = None,
     source_type: str = "github",
     extensions: tuple[str, ...] = (".json", ".txt"),
-) -> list[ParsedDocument]:
+) -> list[Document]:
     documents_root = Path(documents_dir)
     source_root = resolve_document_path(documents_root, path=path, source_type=source_type)
     if not source_root.exists():
         raise FileNotFoundError(f"Document path does not exist: {source_root}")
 
-    parsed: list[ParsedDocument] = []
+    loaded: list[Document] = []
     files = [source_root] if source_root.is_file() else iter_document_files(source_root, extensions)
     for file_index, file_path in enumerate(files):
         if limit is not None and file_index >= limit:
             break
-        parsed.extend(parse_document_file(file_path, documents_root, source_type))
-    return parsed
+        loaded.extend(EnterpriseRagLoader(file_path, documents_root, source_type).load())
+    return split_documents(loaded)
 
 
-def summarize_documents(documents: list[ParsedDocument]) -> dict[str, Any]:
-    total_files = len({document.relative_path for document in documents})
-    lengths = [len(document.content) for document in documents]
+def summarize_documents(documents: list[Document]) -> dict[str, Any]:
+    total_files = len({document.metadata.get("relative_path") for document in documents})
+    lengths = [len(document.page_content) for document in documents]
     sorted_lengths = sorted(lengths)
 
     def percentile(percent: float) -> int:
@@ -563,7 +514,7 @@ def summarize_documents(documents: list[ParsedDocument]) -> dict[str, Any]:
         return sorted_lengths[index]
 
     section_counts = Counter(
-        str(document.metadata.get("section") or document.field_name or "unknown")
+        str(document.metadata.get("section") or "unknown")
         for document in documents
     )
     return {
@@ -582,26 +533,27 @@ def summarize_documents(documents: list[ParsedDocument]) -> dict[str, Any]:
     }
 
 
-def write_manifest(documents: list[ParsedDocument], manifest_file: str | Path) -> None:
+def write_manifest(documents: list[Document], manifest_file: str | Path) -> None:
     path = Path(manifest_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         for document in documents:
-            file.write(json.dumps(asdict(document), ensure_ascii=False) + "\n")
+            row = {"page_content": document.page_content, "metadata": document.metadata}
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def read_manifest(manifest_file: str | Path, limit: int | None = None) -> list[ParsedDocument]:
+def read_manifest(manifest_file: str | Path, limit: int | None = None) -> list[Document]:
     path = Path(manifest_file)
-    documents: list[ParsedDocument] = []
+    documents: list[Document] = []
     with path.open("r", encoding="utf-8") as file:
         for line in file:
             if line.strip():
                 row = json.loads(line)
-                row.setdefault("chunk_id", "")
-                row.setdefault("field_name", "")
-                row.setdefault("chunk_index", 0)
-                row.setdefault("metadata", {})
-                documents.append(ParsedDocument(**row))
+                if set(row) != {"page_content", "metadata"}:
+                    raise ValueError(
+                        "Manifest is not in standard Document format; run scripts.ingest again."
+                    )
+                documents.append(Document(**row))
             if limit is not None and len(documents) >= limit:
                 break
     return documents

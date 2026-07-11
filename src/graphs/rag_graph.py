@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
-
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
+from langchain_core.retrievers import BaseRetriever
 from langgraph.graph import END, StateGraph
 
 from src.graphs.nodes import RagState, generate_answer_node, retrieve_node
 
 
-def build_simple_rag_graph(retriever: Any, llm: ChatAnthropic):
+def build_simple_rag_graph(retriever: BaseRetriever, llm: BaseChatModel):
     # 第一版图保持极简：先把可观测的 LangGraph 流程跑通，再逐步扩展复杂节点。
     graph = StateGraph(RagState)
     graph.add_node("retrieve", retrieve_node(retriever))

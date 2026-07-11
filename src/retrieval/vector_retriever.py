@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_core.embeddings import Embeddings
+from langchain_core.retrievers import BaseRetriever
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 
@@ -29,6 +30,6 @@ def build_retriever(
     qdrant_config: dict[str, Any],
     embeddings: Embeddings,
     top_k: int,
-):
+) -> BaseRetriever:
     vector_store = build_vector_store(qdrant_config, embeddings)
     return vector_store.as_retriever(search_kwargs={"k": top_k})
