@@ -22,8 +22,10 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages(
             "context says unset values fall back to defaults, omission does too unless the "
             "context states an exception. If evidence is insufficient after checking all "
             "requirements and context, identify what is unavailable instead of inventing it. "
-            "Before responding, silently verify that the answer covers every requirement and "
-            "all supported labels or qualifiers.",
+            "Before responding, silently turn the required coverage into a checklist. For each "
+            "item, include every explicitly supported mechanism, input signal, stored state, "
+            "lifetime, processing step, and outcome that explains the answer. Then verify that "
+            "the answer covers every checklist item and all supported labels or qualifiers.",
         ),
         (
             "human",

@@ -31,6 +31,7 @@ class LocalBM25Retriever(BaseRetriever):
     k: int = 30
     k1: float = 1.5
     b: float = 0.75
+    text_section_weight: float = 0.8
 
     _postings: dict[str, list[tuple[int, int]]] = PrivateAttr(default_factory=dict)
     _document_lengths: list[int] = PrivateAttr(default_factory=list)
@@ -78,7 +79,19 @@ class LocalBM25Retriever(BaseRetriever):
                     term_frequency * (self.k1 + 1.0) / denominator
                 )
 
-        ranked = sorted(scores, key=lambda index: (-scores[index], index))[: self.k]
+        weighted_scores = {
+            index: score
+            * (
+                self.text_section_weight
+                if self.documents[index].metadata.get("section") == "text"
+                else 1.0
+            )
+            for index, score in scores.items()
+        }
+        ranked = sorted(
+            weighted_scores,
+            key=lambda index: (-weighted_scores[index], index),
+        )[: self.k]
         results: list[Document] = []
         for index in ranked:
             document = self.documents[index]
@@ -88,12 +101,20 @@ class LocalBM25Retriever(BaseRetriever):
                     metadata={
                         **document.metadata,
                         "retrieval_channels": ["bm25"],
-                        "bm25_score": scores[index],
+                        "bm25_score": weighted_scores[index],
                     },
                 )
             )
         return results
 
 
-def build_bm25_retriever(documents: list[Document], k: int = 30) -> BaseRetriever:
-    return LocalBM25Retriever(documents=documents, k=k)
+def build_bm25_retriever(
+    documents: list[Document],
+    k: int = 30,
+    text_section_weight: float = 0.8,
+) -> BaseRetriever:
+    return LocalBM25Retriever(
+        documents=documents,
+        k=k,
+        text_section_weight=text_section_weight,
+    )

@@ -3,11 +3,53 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from scripts.run_benchmark import iter_questions
 from src.evaluation.benchmark_report import (
     build_failed_questions,
     build_supplementary_metrics,
     write_question_subset,
 )
+
+
+def test_benchmark_question_iterator_filters_question_type(tmp_path: Path) -> None:
+    source = tmp_path / "questions.jsonl"
+    source.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "question_id": "q1",
+                        "question_type": "semantic",
+                        "source_types": ["github"],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "question_id": "q2",
+                        "question_type": "semantic",
+                        "source_types": ["github", "jira"],
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    rows = list(
+        iter_questions(source, source_type="github", question_type="semantic")
+    )
+
+    assert [row["question_id"] for row in rows] == ["q1"]
+
+    mixed_rows = list(
+        iter_questions(
+            source,
+            source_type="github",
+            question_type="semantic",
+            include_mixed_sources=True,
+        )
+    )
+    assert [row["question_id"] for row in mixed_rows] == ["q1", "q2"]
 
 
 def test_question_subset_only_contains_requested_source(tmp_path: Path) -> None:
@@ -16,7 +58,10 @@ def test_question_subset_only_contains_requested_source(tmp_path: Path) -> None:
         "\n".join(
             [
                 json.dumps({"question_id": "q1", "source_types": ["github"]}),
-                json.dumps({"question_id": "q2", "source_types": ["slack"]}),
+                json.dumps(
+                    {"question_id": "q2", "source_types": ["github", "slack"]}
+                ),
+                json.dumps({"question_id": "q3", "source_types": ["slack"]}),
             ]
         ),
         encoding="utf-8",
@@ -27,6 +72,14 @@ def test_question_subset_only_contains_requested_source(tmp_path: Path) -> None:
 
     assert [row["question_id"] for row in rows] == ["q1"]
     assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+
+    mixed_rows = write_question_subset(
+        source,
+        tmp_path / "github-mixed.jsonl",
+        "github",
+        include_mixed_sources=True,
+    )
+    assert [row["question_id"] for row in mixed_rows] == ["q1", "q2"]
 
 
 def test_question_subset_can_be_limited_to_answered_ids(tmp_path: Path) -> None:

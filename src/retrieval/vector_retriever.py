@@ -40,6 +40,7 @@ class HybridCandidateRetriever(BaseRetriever):
     bm25_retriever: BaseRetriever
     candidate_k: int = 40
     rrf_k: int = 60
+    text_section_weight: float = 0.8
 
     def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
         channel_results = {
@@ -61,7 +62,12 @@ class HybridCandidateRetriever(BaseRetriever):
                     document.metadata.get("chunk_id")
                     or f"{document.metadata.get('dsid', '')}::{document.page_content}"
                 )
-                scores[chunk_id] += 1.0 / (self.rrf_k + rank)
+                section_weight = (
+                    self.text_section_weight
+                    if document.metadata.get("section") == "text"
+                    else 1.0
+                )
+                scores[chunk_id] += section_weight / (self.rrf_k + rank)
                 documents.setdefault(chunk_id, document)
                 channels[chunk_id].append(channel)
                 channel_ranks[chunk_id][channel] = rank
@@ -86,12 +92,17 @@ def reciprocal_rank_fuse(
     max_documents: int,
     chunks_per_document: int,
     rrf_k: int = 60,
+    reserved_documents_per_result: int = 0,
+    reserve_entity_link_results: bool = True,
 ) -> dict[str, list[Document]]:
     """按文档执行 RRF；同一查询中的重复 chunk 只贡献该文档的最佳排名。"""
     scores: dict[str, float] = defaultdict(float)
     query_hits: dict[str, int] = defaultdict(int)
     chunks: dict[str, list[Document]] = defaultdict(list)
     seen_chunks: dict[str, set[str]] = defaultdict(set)
+    task_ids: dict[str, set[str]] = defaultdict(set)
+    slots: dict[str, set[str]] = defaultdict(set)
+    reservation_lists: list[list[str]] = []
 
     for documents in query_results:
         best_rank: dict[str, int] = {}
@@ -100,6 +111,9 @@ def reciprocal_rank_fuse(
             if not dsid:
                 continue
             best_rank.setdefault(dsid, rank)
+            task_ids[dsid].update(document.metadata.get("retrieval_task_ids", []))
+            if document.metadata.get("retrieval_slot"):
+                slots[dsid].add(str(document.metadata["retrieval_slot"]))
             chunk_id = str(document.metadata.get("chunk_id") or document.page_content)
             if (
                 chunk_id not in seen_chunks[dsid]
@@ -110,8 +124,25 @@ def reciprocal_rank_fuse(
         for dsid, rank in best_rank.items():
             scores[dsid] += 1.0 / (rrf_k + rank)
             query_hits[dsid] += 1
+        is_entity_result = bool(documents) and all(
+            document.metadata.get("retrieval_slot") == "entity_link"
+            for document in documents
+        )
+        if reserve_entity_link_results or not is_entity_result:
+            reservation_lists.append(
+                list(best_rank)[:reserved_documents_per_result]
+            )
 
-    ordered_ids = sorted(scores, key=lambda dsid: scores[dsid], reverse=True)
+    ranked_ids = sorted(scores, key=lambda dsid: scores[dsid], reverse=True)
+    reserved_ids: list[str] = []
+    for offset in range(reserved_documents_per_result):
+        for reservation in reservation_lists:
+            if offset < len(reservation) and reservation[offset] not in reserved_ids:
+                reserved_ids.append(reservation[offset])
+    ordered_ids = reserved_ids[:max_documents]
+    ordered_ids.extend(
+        dsid for dsid in ranked_ids if dsid not in ordered_ids
+    )
     groups: dict[str, list[Document]] = {}
     for document_rank, dsid in enumerate(ordered_ids[:max_documents], start=1):
         groups[dsid] = [
@@ -122,6 +153,8 @@ def reciprocal_rank_fuse(
                     "document_rrf_rank": document_rank,
                     "document_rrf_score": scores[dsid],
                     "query_hit_count": query_hits[dsid],
+                    "retrieval_task_ids": sorted(task_ids[dsid]),
+                    "retrieval_slots": sorted(slots[dsid]),
                 },
             )
             for document in chunks[dsid]
@@ -206,6 +239,7 @@ def build_hybrid_candidate_retriever(
     bm25_k: int = 30,
     candidate_k: int = 40,
     rrf_k: int = 60,
+    text_section_weight: float = 0.8,
 ) -> BaseRetriever:
     return HybridCandidateRetriever(
         dense_retriever=build_candidate_retriever(
@@ -213,7 +247,12 @@ def build_hybrid_candidate_retriever(
             embeddings,
             candidate_k=dense_k,
         ),
-        bm25_retriever=build_bm25_retriever(documents, k=bm25_k),
+        bm25_retriever=build_bm25_retriever(
+            documents,
+            k=bm25_k,
+            text_section_weight=text_section_weight,
+        ),
         candidate_k=candidate_k,
         rrf_k=rrf_k,
+        text_section_weight=text_section_weight,
     )

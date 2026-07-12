@@ -15,6 +15,19 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in file if line.strip()]
 
 
+def matches_source_type(
+    row: dict[str, Any],
+    source_type: str | None,
+    include_mixed_sources: bool = False,
+) -> bool:
+    if source_type is None:
+        return True
+    source_types = row.get("source_types", [])
+    if include_mixed_sources:
+        return source_type in source_types
+    return source_types == [source_type]
+
+
 def write_jsonl(rows: Iterable[dict[str, Any]], path: str | Path) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -28,11 +41,12 @@ def write_question_subset(
     output_file: str | Path,
     source_type: str,
     question_ids: set[str] | None = None,
+    include_mixed_sources: bool = False,
 ) -> list[dict[str, Any]]:
     questions = [
         row
         for row in load_jsonl(questions_file)
-        if source_type in row.get("source_types", [])
+        if matches_source_type(row, source_type, include_mixed_sources)
         and (question_ids is None or row.get("question_id") in question_ids)
     ]
     write_jsonl(questions, output_file)

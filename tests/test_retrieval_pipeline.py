@@ -12,10 +12,14 @@ from src.graphs.nodes import (
     apply_direct_evidence_guardrail,
     format_candidates,
     format_retrieval_guidance,
+    merge_candidate_archives,
     normalize_plan,
+    preserve_query_identifiers,
+    parse_coverage_document_ids,
     parse_document_ids,
     prioritize_evidence_documents,
     route_after_assessment,
+    route_after_generation,
 )
 from src.graphs.rag_graph import build_adaptive_rag_graph
 from src.ingestion.parse_documents import (
@@ -33,6 +37,11 @@ from src.retrieval.vector_retriever import (
     reciprocal_rank_fuse,
 )
 from src.retrieval.lexical_retriever import LocalBM25Retriever, tokenize_technical_text
+from src.retrieval.entity_links import (
+    build_entity_link_index,
+    expand_documents_by_entity_links,
+    extract_link_entities,
+)
 
 
 def test_loader_and_splitter_use_standard_documents(tmp_path: Path) -> None:
@@ -58,6 +67,30 @@ def test_loader_and_splitter_use_standard_documents(tmp_path: Path) -> None:
     assert len(description_chunks) >= 2
     assert description_chunks[0].metadata["chunk_id"] == "dsid_test::description::0"
     assert description_chunks[1].metadata["chunk_id"] == "dsid_test::description::1"
+
+
+def test_loader_keeps_all_declared_content_fields(tmp_path: Path) -> None:
+    source = tmp_path / "github" / "declared-fields.json"
+    source.parent.mkdir()
+    source.write_text(
+        json.dumps(
+            {
+                "dataset_doc_uuid": "dsid_declared",
+                "title": "Alert review",
+                "conversation": ["Warn keeps workspace_id; page removes it."],
+                "notes_for_ops": "Private deployments use the server setting.",
+                "content_field_names": ["conversation", "notes_for_ops"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = EnterpriseRagLoader(source, tmp_path).load()
+    by_section = {document.metadata["section"]: document for document in loaded}
+
+    assert "Warn keeps workspace_id" in by_section["discussion"].page_content
+    assert "Private deployments" in by_section["text"].page_content
+    assert by_section["text"].metadata["field_names"] == ["notes_for_ops"]
 
 
 def test_manifest_round_trip_uses_document_schema(tmp_path: Path) -> None:
@@ -185,6 +218,178 @@ def test_rrf_rewards_documents_retrieved_by_multiple_queries() -> None:
     assert fused["a"][0].metadata["query_hit_count"] == 2
 
 
+def test_rrf_reserves_top_documents_for_each_requirement() -> None:
+    first = [
+        Document(page_content=f"a{i}", metadata={"dsid": f"a{i}", "chunk_id": f"a{i}"})
+        for i in range(3)
+    ]
+    second = [
+        Document(page_content=f"b{i}", metadata={"dsid": f"b{i}", "chunk_id": f"b{i}"})
+        for i in range(3)
+    ]
+
+    fused = reciprocal_rank_fuse(
+        [first, second],
+        max_documents=4,
+        chunks_per_document=1,
+        reserved_documents_per_result=2,
+    )
+
+    assert list(fused) == ["a0", "b0", "a1", "b1"]
+
+
+def test_rrf_does_not_reserve_entity_links_for_completeness() -> None:
+    base = [
+        Document(
+            page_content=f"base{i}",
+            metadata={"dsid": f"base{i}", "chunk_id": f"base{i}"},
+        )
+        for i in range(3)
+    ]
+    entity = [
+        Document(
+            page_content=f"entity{i}",
+            metadata={
+                "dsid": f"entity{i}",
+                "chunk_id": f"entity{i}",
+                "retrieval_slot": "entity_link",
+            },
+        )
+        for i in range(3)
+    ]
+
+    fused = reciprocal_rank_fuse(
+        [entity, base],
+        max_documents=2,
+        chunks_per_document=1,
+        reserved_documents_per_result=2,
+        reserve_entity_link_results=False,
+    )
+
+    assert list(fused) == ["base0", "base1"]
+
+
+def test_bm25_downweights_generic_text_sections() -> None:
+    retriever = LocalBM25Retriever(
+        documents=[
+            Document(
+                page_content="origin verification release index",
+                metadata={"dsid": "direct", "section": "description"},
+            ),
+            Document(
+                page_content="origin verification release index",
+                metadata={"dsid": "notes", "section": "text"},
+            ),
+        ],
+        k=2,
+        text_section_weight=0.8,
+    )
+
+    results = retriever.invoke("origin verification release index")
+
+    assert [document.metadata["dsid"] for document in results] == [
+        "direct",
+        "notes",
+    ]
+
+
+def test_entity_link_expansion_finds_documents_sharing_ticket() -> None:
+    seed = Document(
+        page_content="Root cause tracked in ENG-1234.",
+        metadata={"dsid": "seed", "chunk_id": "seed::0"},
+    )
+    linked = Document(
+        page_content="ENG-1234 rollout and mitigation details.",
+        metadata={"dsid": "linked", "chunk_id": "linked::0"},
+    )
+    unrelated = Document(
+        page_content="No shared identifier.",
+        metadata={"dsid": "other", "chunk_id": "other::0"},
+    )
+    parents = build_parent_document_store([seed, linked, unrelated])
+    index = build_entity_link_index(parents)
+
+    expanded, trace = expand_documents_by_entity_links(
+        [seed],
+        parents,
+        index,
+        max_linked_documents=2,
+    )
+
+    assert extract_link_entities(seed.page_content) == {"ENG-1234"}
+    assert [document.metadata["dsid"] for document in expanded] == ["seed", "linked"]
+    assert expanded[1].metadata["retrieval_channels"] == ["entity_link"]
+    assert trace == {"linked": ["ENG-1234"]}
+    assert extract_link_entities("PR #157 and pr-157") == {"PR-157"}
+
+
+def test_coverage_selection_preserves_each_requirement() -> None:
+    groups = {
+        "noise": [Document(page_content="noise", metadata={"retrieval_task_ids": []})],
+        "a": [Document(page_content="a", metadata={"retrieval_task_ids": ["r1"]})],
+        "b": [Document(page_content="b", metadata={"retrieval_task_ids": ["r2"]})],
+    }
+    tasks = [
+        {"task_id": "r1", "requirement": "first", "slot": "general", "query": "a"},
+        {"task_id": "r2", "requirement": "second", "slot": "general", "query": "b"},
+    ]
+
+    selected = parse_coverage_document_ids(
+        '{"document_ids":["noise"]}',
+        groups,
+        tasks,
+        strategy="multi_document",
+        source_scope="multiple_sources",
+        budget=2,
+        minimum=2,
+    )
+
+    assert set(selected) == {"a", "b"}
+
+
+def test_coverage_selection_reuses_one_document_for_all_requirements() -> None:
+    groups = {
+        "complete": [
+            Document(
+                page_content="covers both states",
+                metadata={"retrieval_task_ids": ["r1", "r2"]},
+            )
+        ],
+        "extra": [Document(page_content="analogous behavior", metadata={})],
+    }
+    tasks = [
+        {"task_id": "r1", "requirement": "null", "slot": "general", "query": "null"},
+        {"task_id": "r2", "requirement": "omitted", "slot": "general", "query": "omitted"},
+    ]
+
+    selected = parse_coverage_document_ids(
+        '{"document_ids":["complete","extra"],"coverage":['
+        '{"task_id":"r1","document_ids":["complete"]},'
+        '{"task_id":"r2","document_ids":["complete"]}]}',
+        groups,
+        tasks,
+        strategy="multi_document",
+        source_scope="multiple_sources",
+        budget=2,
+        minimum=2,
+    )
+
+    assert selected == ["complete"]
+
+
+def test_candidate_archive_keeps_previous_round_documents() -> None:
+    previous = {
+        "gold": [Document(page_content="gold", metadata={"chunk_id": "gold::0"})]
+    }
+    current = {
+        "new": [Document(page_content="new", metadata={"chunk_id": "new::0"})],
+    }
+
+    merged = merge_candidate_archives(previous, current, max_documents=2)
+
+    assert list(merged) == ["gold", "new"]
+
+
 def test_candidate_format_prioritizes_direct_time_evidence() -> None:
     overview = Document(
         page_content="General batching migration guidance.",
@@ -193,6 +398,7 @@ def test_candidate_format_prioritizes_direct_time_evidence() -> None:
             "document_rrf_rank": 1,
             "query_hit_count": 2,
             "retrieval_channels": ["dense"],
+            "retrieval_task_ids": ["r1"],
         },
     )
     direct = Document(
@@ -202,6 +408,7 @@ def test_candidate_format_prioritizes_direct_time_evidence() -> None:
             "document_rrf_rank": 1,
             "query_hit_count": 2,
             "retrieval_channels": ["bm25"],
+            "retrieval_task_ids": ["r1"],
         },
     )
 
@@ -214,6 +421,7 @@ def test_candidate_format_prioritizes_direct_time_evidence() -> None:
 
     assert formatted.index("10ms") < formatted.index("General batching")
     assert "Retrieval channels: bm25, dense" in formatted
+    assert "Task matches: r1" in formatted
 
 
 def test_direct_evidence_guardrail_recovers_time_value() -> None:
@@ -367,7 +575,7 @@ def test_normalize_plan_applies_adaptive_budget_and_keeps_original_query() -> No
     )
 
     assert plan["queries"][0] == "original question"
-    assert plan["document_budget"] == 6
+    assert plan["document_budget"] == 10
     assert plan["minimum_documents"] == 6
 
     single = normalize_plan(
@@ -382,6 +590,123 @@ def test_normalize_plan_applies_adaptive_budget_and_keeps_original_query() -> No
     )
     assert single["queries"] == ["exact lookup"]
     assert single["document_budget"] == 1
+
+
+def test_normalize_plan_builds_requirement_tasks_and_conflict_slots() -> None:
+    completeness = normalize_plan(
+        {
+            "strategy": "multi_document",
+            "document_budget": 6,
+            "requirements": ["Go tickets", "Python tickets", "TypeScript tickets"],
+            "retrieval_tasks": [
+                {"requirement": "Go tickets", "slot": "go", "query": "Go auth tickets"},
+                {
+                    "requirement": "Python tickets",
+                    "slot": "python",
+                    "query": "Python auth tickets",
+                },
+                {
+                    "requirement": "TypeScript tickets",
+                    "slot": "typescript",
+                    "query": "TypeScript auth tickets",
+                },
+            ],
+        },
+        question="Across all SDKs, which has the highest number and all corresponding tickets?",
+        max_queries=10,
+        max_documents=10,
+    )
+
+    assert completeness["strategy"] == "completeness"
+    assert [task["task_id"] for task in completeness["retrieval_tasks"]] == [
+        "r1",
+        "r2",
+        "r3",
+    ]
+    assert completeness["document_budget"] == 10
+
+    conflicting = normalize_plan(
+        {"strategy": "single", "requirements": ["compare behavior"]},
+        question="What are the previous and current thresholds?",
+        max_queries=10,
+        max_documents=10,
+    )
+
+    assert conflicting["strategy"] == "conflicting"
+    assert [task["slot"] for task in conflicting["retrieval_tasks"]] == [
+        "previous",
+        "current",
+    ]
+
+    same_document = normalize_plan(
+        {
+            "strategy": "multi_document",
+            "source_scope": "single_source",
+            "requirements": ["file limit", "request limit"],
+            "retrieval_tasks": [
+                {"requirement": "file limit", "query": "file limit"},
+                {"requirement": "request limit", "query": "request limit"},
+            ],
+        },
+        question="What are the file and request limits for multipart upload?",
+        max_queries=10,
+        max_documents=10,
+    )
+
+    assert same_document["strategy"] == "single"
+    assert same_document["document_budget"] == 1
+    assert same_document["queries"] == [
+        "What are the file and request limits for multipart upload?"
+    ]
+
+    parameter_states = normalize_plan(
+        {
+            "strategy": "conflicting",
+            "source_scope": "multiple_sources",
+            "requirements": ["explicit null", "omitted field"],
+            "retrieval_tasks": [
+                {"requirement": "explicit null", "query": "max_tokens null"},
+                {"requirement": "omitted field", "query": "max_tokens omitted"},
+            ],
+        },
+        question=(
+            "How does the normalizer handle max_tokens as null compared to leaving it "
+            "out entirely?"
+        ),
+        max_queries=10,
+        max_documents=10,
+    )
+
+    assert parameter_states["strategy"] == "single"
+    assert parameter_states["source_scope"] == "single_source"
+    assert parameter_states["document_budget"] == 1
+
+    release_components = normalize_plan(
+        {
+            "strategy": "multi_document",
+            "source_scope": "multiple_sources",
+            "requirements": ["config flag", "other release components"],
+        },
+        question=(
+            "What config flag enables the TP fanout planner, and what other new "
+            "components are called out in the release notes?"
+        ),
+        max_queries=10,
+        max_documents=10,
+    )
+
+    assert release_components["strategy"] == "single"
+    assert release_components["source_scope"] == "single_source"
+    assert release_components["document_budget"] == 1
+
+
+def test_follow_up_query_preserves_exact_question_identifiers() -> None:
+    query = preserve_query_identifiers(
+        "fanout planner configuration setting",
+        "Which flag controls TP allreduce in runtime.bandwidth_fanout.enabled?",
+    )
+
+    assert query.endswith("TP runtime.bandwidth_fanout.enabled")
 
 
 def test_parse_document_ids_filters_unknown_and_fills_minimum() -> None:
@@ -481,6 +806,116 @@ def test_langchain_components_run_inside_unified_langgraph() -> None:
     assert state["answer"] == "The limit is 10 MiB."
     assert state["document_ids"] == ["a"]
     assert state["executed_queries"] == ["What is the upload limit?"]
+
+
+def test_graph_repairs_answer_that_conflicts_with_sufficient_evidence() -> None:
+    class FakeVectorStore:
+        def similarity_search(self, query: str, **kwargs):
+            return [
+                Document(
+                    page_content=(
+                        "Explicit null is unset and falls back to model defaults."
+                    ),
+                    metadata={
+                        "dsid": "a",
+                        "chunk_id": "a::discussion::0",
+                        "title": "Parameter normalization",
+                    },
+                )
+            ]
+
+    retriever = SimilarityCandidateRetriever.model_construct(
+        vector_store=FakeVectorStore(),
+        candidate_k=10,
+    )
+    llm = FakeListChatModel(
+        responses=[
+            '{"strategy":"single","source_scope":"single_source",'
+            '"requirements":["null and omission behavior"]}',
+            '{"document_ids":["a"]}',
+            '{"sufficient":true,"relevant_chunk_ids":["a::discussion::0"],'
+            '"missing_evidence":[],"follow_up_queries":[]}',
+            "The provided context does not specify omission behavior.",
+            "Null and omission are both unset and fall back to model defaults.",
+        ]
+    )
+    graph = build_adaptive_rag_graph(
+        retriever,
+        llm,
+        build_parent_document_store(retriever.invoke("seed")),
+        {"max_queries": 5, "max_documents": 10, "candidate_documents": 10},
+    )
+
+    state = graph.invoke({"question": "How do null and omission differ?"})
+
+    assert route_after_generation(
+        {"evidence_sufficient": True, "answer": "The context does not specify it."}
+    ) == "repair_answer"
+    assert state["original_answer"] == (
+        "The provided context does not specify omission behavior."
+    )
+    assert state["answer"] == (
+        "Null and omission are both unset and fall back to model defaults."
+    )
+    assert state["answer_repaired"] is True
+
+
+def test_langgraph_expands_linked_entities_between_retrieval_and_rerank() -> None:
+    class FakeVectorStore:
+        def similarity_search(self, query: str, **kwargs):
+            return [
+                Document(
+                    page_content="Incident references ENG-1234.",
+                    metadata={"dsid": "seed", "chunk_id": "seed::0", "title": "Seed"},
+                )
+            ]
+
+    seed = Document(
+        page_content="Incident references ENG-1234.",
+        metadata={"dsid": "seed", "chunk_id": "seed::0", "title": "Seed"},
+    )
+    linked = Document(
+        page_content="ENG-1234 contains the rollout answer.",
+        metadata={"dsid": "linked", "chunk_id": "linked::0", "title": "Linked"},
+    )
+    parents = build_parent_document_store([seed, linked])
+    retriever = SimilarityCandidateRetriever.model_construct(
+        vector_store=FakeVectorStore(),
+        candidate_k=10,
+    )
+    llm = FakeListChatModel(
+        responses=[
+            '{"strategy":"multi_document","source_scope":"multiple_sources",'
+            '"document_budget":2,"requirements":["rollout"],'
+            '"retrieval_tasks":[{"requirement":"rollout","slot":"general",'
+            '"query":"ENG-1234 rollout"}]}',
+            '{"document_ids":["linked"],"coverage":['
+            '{"task_id":"r1","document_ids":["linked"]}]}',
+            '{"sufficient":true,"relevant_chunk_ids":["linked::0"],'
+            '"missing_evidence":[],"follow_up_queries":[]}',
+            "linked answer",
+        ]
+    )
+    graph = build_adaptive_rag_graph(
+        retriever,
+        llm,
+        parents,
+        {"max_queries": 10, "candidate_documents": 10},
+        entity_index=build_entity_link_index(parents),
+    )
+
+    state = graph.invoke({"question": "What was the rollout?"})
+
+    assert state["document_ids"][0] == "linked"
+    assert state["entity_expansions"][0]["linked_documents"] == {
+        "linked": ["ENG-1234"]
+    }
+    assert state["executed_tasks"][0]["task_id"] == "r1"
+    assert [document.metadata["dsid"] for document in state["query_results"][0]] == [
+        "seed"
+    ]
+    assert state["query_results"][1][0].metadata["dsid"] == "linked"
+    assert state["answer"] == "linked answer"
 
 
 def test_unified_graph_runs_bounded_follow_up_retrieval() -> None:

@@ -51,7 +51,10 @@ def run_official_evaluation(
     if resume:
         command.append("--resume")
 
-    subprocess.run(command, cwd=official_repo, env=os.environ.copy(), check=True)
+    child_env = os.environ.copy()
+    # 官方读取器未显式指定 encoding；Windows 上需在解释器启动前启用 UTF-8 模式。
+    child_env["PYTHONUTF8"] = "1"
+    subprocess.run(command, cwd=official_repo, env=child_env, check=True)
 
 
 def main() -> None:
@@ -76,6 +79,11 @@ def main() -> None:
         "--only-answered",
         action="store_true",
         help="Evaluate only question IDs present in answers.jsonl.",
+    )
+    parser.add_argument(
+        "--include-mixed-source-questions",
+        action="store_true",
+        help="Evaluate questions that combine the selected source with other sources.",
     )
     parser.add_argument(
         "--skip-official",
@@ -116,6 +124,7 @@ def main() -> None:
         questions_subset_file,
         args.source_type,
         question_ids=set(answer_ids) if args.only_answered else None,
+        include_mixed_sources=args.include_mixed_source_questions,
     )
     answer_count = len(answer_rows)
     if answer_count != len(questions):

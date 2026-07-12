@@ -58,13 +58,17 @@ def append_graph_trace(
         "question_id": question_id,
         "plan": state.get("plan", {}),
         "executed_queries": state.get("executed_queries", []),
+        "executed_tasks": state.get("executed_tasks", []),
         "retrieval_round": state.get("retrieval_round", 0),
         "selected_document_ids": state.get("selected_document_ids", []),
         "candidate_document_ids": list(state.get("candidate_groups", {})),
         "rerank_history": state.get("rerank_history", []),
+        "entity_expansions": state.get("entity_expansions", []),
         "query_candidates": [
             {
-                "query": query,
+                "query": task.get("query", ""),
+                "task_id": task.get("task_id"),
+                "slot": task.get("slot"),
                 "document_ids": list(
                     dict.fromkeys(
                         str(document.metadata.get("dsid"))
@@ -90,14 +94,16 @@ def append_graph_trace(
                     )
                 },
             }
-            for query, documents in zip(
-                state.get("executed_queries", []),
+            for task, documents in zip(
+                state.get("result_tasks", state.get("executed_tasks", [])),
                 state.get("query_results", []),
             )
         ],
         "evidence_sufficient": state.get("evidence_sufficient", False),
         "can_retry": state.get("can_retry", False),
         "missing_evidence": state.get("missing_evidence", []),
+        "answer_repaired": state.get("answer_repaired", False),
+        "original_answer": state.get("original_answer"),
         "answer_chunk_ids": [
             document.metadata.get("chunk_id")
             for document in state.get("answer_docs", [])

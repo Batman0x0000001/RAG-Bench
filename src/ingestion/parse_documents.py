@@ -86,6 +86,7 @@ CONTENT_FIELD_WHITELIST = {
 SECTION_FIELDS = {
     "description": {"description", "body"},
     "discussion": {
+        "conversation",
         "review_comments",
         "review_thread",
         "review_timeline",
@@ -330,9 +331,9 @@ def _collect_sections(doc: dict[str, Any], title_field: str) -> dict[str, dict[s
         "overview": {"field_names": overview_field_names, "items": [_overview_text(doc)]}
     }
     for field_name in _content_field_names(doc, title_field):
-        section = _section_for_field(field_name)
-        if section is None:
-            continue
+        # content_field_names 是数据源对正文范围的显式声明；未知字段仍需进入通用文本区，
+        # 否则会静默丢失 review、迁移、运维等关键证据。
+        section = _section_for_field(field_name) or "text"
         sections.setdefault(section, {"field_names": [], "items": []})
         sections[section]["field_names"].append(field_name)
         sections[section]["items"].extend(_field_to_items(field_name, doc[field_name]))

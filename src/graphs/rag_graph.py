@@ -10,13 +10,17 @@ from langgraph.graph import END, StateGraph
 from src.graphs.nodes import (
     RagState,
     assess_evidence_node,
+    expand_entity_links_node,
     expand_parents_node,
     fuse_and_rerank_node,
     generate_answer_node,
     plan_question_node,
+    repair_answer_node,
     retrieve_queries_node,
     route_after_assessment,
+    route_after_generation,
 )
+from src.graphs.retrieval_policy import build_retrieval_policies
 
 
 def build_adaptive_rag_graph(
@@ -24,6 +28,7 @@ def build_adaptive_rag_graph(
     llm: BaseChatModel,
     parent_documents: dict[str, list[Document]],
     config: dict[str, Any],
+    entity_index: dict[str, list[str]] | None = None,
 ):
     """LangGraph 管控制流，节点内部复用标准 LangChain 组件。"""
     graph = StateGraph(RagState)
@@ -43,13 +48,23 @@ def build_adaptive_rag_graph(
         ),
     )
     graph.add_node(
+        "expand_entity_links",
+        expand_entity_links_node(
+            parent_documents,
+            entity_index or {},
+            seed_documents=int(config.get("entity_seed_documents", 8)),
+            max_linked_documents=int(config.get("max_linked_documents", 8)),
+            chunks_per_document=int(config.get("entity_chunks_per_document", 1)),
+        ),
+    )
+    graph.add_node(
         "fuse_and_rerank",
         fuse_and_rerank_node(
             llm,
             rrf_k=int(config.get("rrf_k", 60)),
-            candidate_documents=int(config.get("candidate_documents", 24)),
             chunks_per_document=int(config.get("chunks_per_document", 2)),
             rerank_chunk_chars=int(config.get("rerank_chunk_chars", 800)),
+            policies=build_retrieval_policies(config),
         ),
     )
     graph.add_node(
@@ -68,10 +83,12 @@ def build_adaptive_rag_graph(
         ),
     )
     graph.add_node("generate_answer", generate_answer_node(llm))
+    graph.add_node("repair_answer", repair_answer_node(llm))
 
     graph.set_entry_point("plan_question")
     graph.add_edge("plan_question", "retrieve_queries")
-    graph.add_edge("retrieve_queries", "fuse_and_rerank")
+    graph.add_edge("retrieve_queries", "expand_entity_links")
+    graph.add_edge("expand_entity_links", "fuse_and_rerank")
     graph.add_edge("fuse_and_rerank", "expand_parents")
     graph.add_edge("expand_parents", "assess_evidence")
     graph.add_conditional_edges(
@@ -85,5 +102,13 @@ def build_adaptive_rag_graph(
             "generate_answer": "generate_answer",
         },
     )
-    graph.add_edge("generate_answer", END)
+    graph.add_conditional_edges(
+        "generate_answer",
+        route_after_generation,
+        {
+            "repair_answer": "repair_answer",
+            "end": END,
+        },
+    )
+    graph.add_edge("repair_answer", END)
     return graph.compile(name="adaptive_enterprise_rag")

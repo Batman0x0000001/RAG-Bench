@@ -11,9 +11,11 @@ from src.evaluation.answer_writer import (
     append_graph_trace,
     append_retrieved_docs,
 )
+from src.evaluation.benchmark_report import matches_source_type
 from src.graphs.rag_graph import build_adaptive_rag_graph
 from src.ingestion.parse_documents import read_manifest
 from src.retrieval.embeddings import build_embeddings
+from src.retrieval.entity_links import build_entity_link_index
 from src.retrieval.vector_retriever import (
     build_hybrid_candidate_retriever,
     build_parent_document_store,
@@ -26,6 +28,8 @@ def iter_questions(
     path: str | Path,
     limit: int | None = None,
     source_type: str | None = None,
+    question_type: str | None = None,
+    include_mixed_sources: bool = False,
 ):
     yielded = 0
     with Path(path).open("r", encoding="utf-8") as file:
@@ -33,7 +37,13 @@ def iter_questions(
             if not line.strip():
                 continue
             question = json.loads(line)
-            if source_type and source_type not in question.get("source_types", []):
+            if not matches_source_type(
+                question,
+                source_type,
+                include_mixed_sources=include_mixed_sources,
+            ):
+                continue
+            if question_type and question.get("question_type") != question_type:
                 continue
             yield question
             yielded += 1
@@ -58,9 +68,19 @@ def main() -> None:
     parser.add_argument(
         "--question-source-type",
         default=None,
-        help="Only run questions whose source_types include this value.",
+        help="Only run questions whose source_types exactly match this value.",
+    )
+    parser.add_argument(
+        "--question-type",
+        default=None,
+        help="Select a benchmark question type for a focused experiment only.",
     )
     parser.add_argument("--all-questions", action="store_true")
+    parser.add_argument(
+        "--include-mixed-source-questions",
+        action="store_true",
+        help="Include questions that combine the selected source with other sources.",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -75,6 +95,12 @@ def main() -> None:
     llm = build_chat_model(config["llm"])
     manifest_documents = read_manifest(config["data"]["manifest_file"])
     parent_documents = build_parent_document_store(manifest_documents)
+    entity_index = build_entity_link_index(
+        parent_documents,
+        max_document_frequency=int(
+            config["retrieval"].get("entity_max_document_frequency", 20)
+        ),
+    )
     retrieval_config = config["retrieval"]
     logging.info("Building local BM25 index from %d chunks", len(manifest_documents))
     retriever = build_hybrid_candidate_retriever(
@@ -85,13 +111,18 @@ def main() -> None:
         bm25_k=int(retrieval_config.get("bm25_candidate_k", 30)),
         candidate_k=int(retrieval_config.get("hybrid_candidate_k", 40)),
         rrf_k=int(retrieval_config.get("channel_rrf_k", 60)),
+        text_section_weight=float(
+            retrieval_config.get("text_section_weight", 0.8)
+        ),
     )
     logging.info("Local BM25 index is ready")
+    logging.info("Entity link index contains %d reusable identifiers", len(entity_index))
     graph = build_adaptive_rag_graph(
         retriever,
         llm,
         parent_documents,
         retrieval_config,
+        entity_index=entity_index,
     )
 
     answers_file = run_dir / "answers.jsonl"
@@ -103,6 +134,8 @@ def main() -> None:
         config["data"]["questions_file"],
         limit=args.limit,
         source_type=question_source_type,
+        question_type=args.question_type,
+        include_mixed_sources=args.include_mixed_source_questions,
     ):
         question_id = question["question_id"]
         logging.info("Answering %s", question_id)

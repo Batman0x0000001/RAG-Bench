@@ -55,10 +55,24 @@ Benchmark execution always uses one unified adaptive graph. LangChain components
 perform query planning, parallel `BaseRetriever.batch()` calls, prompt/model
 execution, and output parsing. Each planned query runs against Dense and BM25
 channels; chunk-level RRF combines those channels, then document-level RRF
-combines all query variants. LangGraph controls the state transitions:
-`plan -> hybrid retrieve -> query RRF -> rerank -> parent expand -> evidence check`.
+combines all query variants. Multi-document plans are split into requirement tasks;
+each task keeps a candidate quota before global RRF, and conflicting plans use
+separate previous/current slots. LangGraph controls the state transitions:
+`plan -> requirement retrieval -> entity-link expansion -> quota RRF -> coverage rerank -> parent expand -> evidence check`.
+The planner also declares `source_scope`. A `single_source` plan always keeps the
+original question, a one-document budget, and the conservative path without entity
+expansion. Entity links and coverage quotas only run for true multi-source
+multi-document, conflicting, or completeness plans. Earlier-round candidates are
+archived so a follow-up round cannot remove evidence that was already found.
 When evidence is incomplete, the graph performs one bounded follow-up retrieval
 round before answer generation. Follow-up queries use the same hybrid retriever.
+After generation, a consistency guard performs one bounded repair only when the
+evidence assessment is sufficient but the draft still claims a requested item is
+unknown or unavailable. Normal answers do not incur this additional model call.
+Generic `text` sections remain searchable with a small Dense/BM25 fusion discount so
+declared operational fields do not overwhelm direct description/discussion evidence.
+Completeness plans use a larger candidate pool with fair per-task reservations, while
+entity-link branches do not consume those reserved positions.
 Document budgets adapt from small single-source
 queries to broad completeness queries. This does not require a different manifest
 or vector collection.
@@ -83,6 +97,12 @@ The benchmark output is written to `runs/<RUN_NAME>/answers.jsonl`.
 Adaptive planning, executed queries, retrieval rounds, selected documents, and
 evidence checks are recorded in `runs/<RUN_NAME>/graph_traces.jsonl`. Each query
 candidate also records whether it came from `dense`, `bm25`, or both channels.
+The process builds a lightweight local link index for reusable PR, issue, and ticket
+identifiers. Documents reached through those links are tagged as `entity_link` candidates.
+`executed_tasks` and `entity_expansions` make requirement coverage and graph expansion
+visible in the trace.
+Answer repairs are recorded with `answer_repaired` and `original_answer` so generation
+failures can be distinguished from retrieval failures.
 The reranker receives document RRF rank, query-hit count, retrieval channels, and
 evidence-first excerpts. For single-document questions that explicitly request a
 wait-time value, HTTP status, size limit, or three named modes/settings, a narrow
@@ -101,7 +121,7 @@ starts. It adds startup time but creates no persistent files and does not modify
 the existing Qdrant collection. To run a low-cost hybrid comparison first:
 
 ```powershell
-$env:RUN_NAME = "12_generation_and_enum_fix_n10"
+$env:RUN_NAME = "14_requirement_coverage_n10"
 python -m scripts.run_benchmark --question-source-type github --limit 10
 python -m scripts.evaluate --source-type github --parallelism 1 --only-answered
 ```
