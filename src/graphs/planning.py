@@ -93,6 +93,33 @@ def normalize_plan(
             for term in ("across ", "different projects", "multiple releases")
         )
     )
+    single_change_with_observed_result = (
+        bool(
+            re.search(
+                r"\bwhat (?:change|mechanism|proposal|update)\b",
+                lowered_question,
+            )
+        )
+        and any(
+            phrase in lowered_question
+            for phrase in ("was observed", "were observed", "measured", "benchmark")
+        )
+        and not any(
+            phrase in lowered_question
+            for phrase in (
+                "different projects",
+                "separate projects",
+                "each sdk",
+                "each project",
+                "respectively",
+            )
+        )
+        and not re.search(
+            r"\bacross (?:the )?(?:python|typescript|go|java|sdk|project|"
+            r"repository|version|release)s?\b",
+            lowered_question,
+        )
+    )
     if (
         "complete list" in lowered_question
         or "all corresponding" in lowered_question
@@ -114,7 +141,11 @@ def normalize_plan(
             else "single_source"
         )
     )
-    if same_source_state_comparison or same_release_components:
+    if (
+        same_source_state_comparison
+        or same_release_components
+        or single_change_with_observed_result
+    ):
         strategy = "single"
         source_scope = "single_source"
     elif strategy in {"conflicting", "completeness"}:

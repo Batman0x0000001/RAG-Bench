@@ -699,6 +699,43 @@ def test_normalize_plan_builds_requirement_tasks_and_conflict_slots() -> None:
     assert release_components["source_scope"] == "single_source"
     assert release_components["document_budget"] == 1
 
+    observed_result = normalize_plan(
+        {
+            "strategy": "multi_document",
+            "source_scope": "multiple_sources",
+            "document_budget": 4,
+            "requirements": ["implementation change", "observed memory reduction"],
+            "retrieval_tasks": [
+                {"requirement": "implementation change", "query": "buffer reuse"},
+                {"requirement": "observed memory reduction", "query": "memory reduction"},
+            ],
+        },
+        question=(
+            "What change reused temporary buffers, and what memory reduction was "
+            "observed in the benchmark?"
+        ),
+        max_queries=10,
+        max_documents=10,
+    )
+
+    assert observed_result["strategy"] == "single"
+    assert observed_result["source_scope"] == "single_source"
+    assert observed_result["document_budget"] == 1
+
+    independent_updates = normalize_plan(
+        {
+            "strategy": "multi_document",
+            "source_scope": "multiple_sources",
+            "requirements": ["Python update", "Go update"],
+        },
+        question="What changes were released across the Python and Go SDKs?",
+        max_queries=10,
+        max_documents=10,
+    )
+
+    assert independent_updates["strategy"] == "multi_document"
+    assert independent_updates["source_scope"] == "multiple_sources"
+
 
 def test_follow_up_query_preserves_exact_question_identifiers() -> None:
     query = preserve_query_identifiers(
