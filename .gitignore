@@ -5,3 +5,5 @@ external/
 runs/
 __pycache__/
 .pytest*/
+experiments/
+docs/

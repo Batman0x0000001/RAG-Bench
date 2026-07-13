@@ -7,6 +7,18 @@ DeepSeek's Anthropic-compatible API for reasoning and answer generation,
 LangChain for standard retrieval/model/prompt components, and LangGraph for
 adaptive workflow orchestration.
 
+## Stable version
+
+The production path is fixed to **Stage 26**, the current n39 baseline. Its
+LangGraph topology is defined in `src/graphs/workflow.py`, while
+`src/graphs/rag_graph.py` preserves the existing public API. State, node
+behavior, planning, and retrieval policies are separated so workflow wiring can
+change without mixing experimental logic into the stable nodes.
+
+Failed experiments and their executable snapshots are isolated under
+`experiments/`; historical evaluation outputs remain under `runs/`. See
+`docs/STABLE_STAGE26.md` for the stable topology and promotion rules.
+
 ## Setup
 
 ```bash

@@ -12,7 +12,7 @@ from src.evaluation.answer_writer import (
     append_retrieved_docs,
 )
 from src.evaluation.benchmark_report import matches_source_type
-from src.graphs.rag_graph import build_adaptive_rag_graph
+from src.graphs.workflow import build_stage26_rag_graph
 from src.ingestion.parse_documents import read_manifest
 from src.retrieval.embeddings import build_embeddings
 from src.retrieval.entity_links import build_entity_link_index
@@ -117,7 +117,7 @@ def main() -> None:
     )
     logging.info("Local BM25 index is ready")
     logging.info("Entity link index contains %d reusable identifiers", len(entity_index))
-    graph = build_adaptive_rag_graph(
+    graph = build_stage26_rag_graph(
         retriever,
         llm,
         parent_documents,

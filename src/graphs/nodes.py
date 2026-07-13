@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, TypedDict
+from typing import Any
 
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
@@ -16,6 +16,7 @@ from src.graphs.planning import (
     preserve_query_identifiers,
 )
 from src.graphs.retrieval_policy import RetrievalPolicy, Strategy
+from src.graphs.state import RagState
 from src.retrieval.entity_links import expand_documents_by_entity_links
 from src.retrieval.lexical_retriever import tokenize_technical_text
 from src.retrieval.vector_retriever import (
@@ -110,33 +111,6 @@ Context:
 Draft answer:
 {answer}
 """
-
-class RagState(TypedDict, total=False):
-    question: str
-    plan: dict[str, Any]
-    pending_queries: list[str]
-    pending_tasks: list[dict[str, str]]
-    executed_queries: list[str]
-    executed_tasks: list[dict[str, str]]
-    query_results: list[list[Document]]
-    base_query_results: list[list[Document]]
-    result_tasks: list[dict[str, str]]
-    entity_expansions: list[dict[str, Any]]
-    candidate_groups: dict[str, list[Document]]
-    candidate_archive: dict[str, list[Document]]
-    selected_document_ids: list[str]
-    rerank_history: list[dict[str, Any]]
-    retrieved_docs: list[Document]
-    answer_docs: list[Document]
-    missing_evidence: list[str]
-    evidence_sufficient: bool
-    can_retry: bool
-    retrieval_round: int
-    answer: str
-    original_answer: str
-    answer_repaired: bool
-    document_ids: list[str]
-
 
 def _json_object(text: str) -> dict[str, Any]:
     match = re.search(r"\{.*\}", text, flags=re.DOTALL)
