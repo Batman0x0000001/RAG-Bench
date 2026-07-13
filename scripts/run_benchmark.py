@@ -5,14 +5,28 @@ import json
 import logging
 from pathlib import Path
 
-from src.chains.langchain_rag import build_chat_model
+from src.chains.langchain_rag import ANSWER_PROMPT, build_chat_model
 from src.evaluation.answer_writer import (
     append_answer,
     append_graph_trace,
     append_retrieved_docs,
 )
 from src.evaluation.benchmark_report import matches_source_type
-from src.graphs.workflow import build_stage26_rag_graph
+from src.evaluation.experiment_protocol import (
+    build_question_metrics,
+    build_run_manifest,
+    write_question_metrics_outputs,
+    write_run_manifest,
+)
+from src.evaluation.experiment_config import apply_experiment_variant, get_dataset
+from src.graphs.nodes import (
+    ANSWER_REPAIR_PROMPT,
+    EVIDENCE_PROMPT,
+    P0_EVIDENCE_PROMPT,
+    RERANK_PROMPT,
+)
+from src.graphs.planning import PLAN_PROMPT
+from src.graphs.workflow import build_rag_graph
 from src.ingestion.parse_documents import read_manifest
 from src.retrieval.embeddings import build_embeddings
 from src.retrieval.entity_links import build_entity_link_index
@@ -54,7 +68,14 @@ def iter_questions(
 def prepare_run_dir(config: dict) -> Path:
     run_dir = Path(config["output"]["runs_dir"]) / config["run_name"]
     run_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ["answers.jsonl", "retrieved_docs.jsonl", "graph_traces.jsonl"]:
+    for filename in [
+        "answers.jsonl",
+        "retrieved_docs.jsonl",
+        "graph_traces.jsonl",
+        "question_metrics.jsonl",
+        "run_summary.json",
+        "run_manifest.json",
+    ]:
         target = run_dir / filename
         if target.exists():
             target.unlink()
@@ -64,6 +85,12 @@ def prepare_run_dir(config: dict) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the adaptive RAG benchmark graph.")
     parser.add_argument("--config", default=None, help="Optional YAML/JSON config override file.")
+    parser.add_argument("--run-name", default=None)
+    parser.add_argument(
+        "--workflow-profile", choices=("stage26", "p0_candidate"), default=None
+    )
+    parser.add_argument("--variant", default=None)
+    parser.add_argument("--dataset", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--question-source-type",
@@ -85,6 +112,24 @@ def main() -> None:
 
     setup_logging()
     config = load_config(args.config)
+    if args.run_name:
+        config["run_name"] = args.run_name
+    profile = args.workflow_profile or config.get("workflow", {}).get(
+        "profile", "stage26"
+    )
+    config.setdefault("workflow", {})["profile"] = profile
+    if profile == "p0_candidate":
+        variant = args.variant or config.get("experiment", {}).get("variant", "p0_full")
+        config = apply_experiment_variant(config, variant)
+        dataset_name = args.dataset or config.get("experiment", {}).get(
+            "dataset", "github_dev"
+        )
+        dataset = get_dataset(dataset_name)
+        config["experiment"]["dataset"] = dataset_name
+        config["data"]["questions_file"] = dataset.blind_questions_file
+        config["data"]["manifest_file"] = dataset.manifest_file
+        config["data"]["default_source_type"] = dataset.source_type
+        config["qdrant"]["collection"] = dataset.qdrant_collection
     run_dir = prepare_run_dir(config)
     default_source_type = config["data"].get("default_source_type", "github")
     question_source_type = (
@@ -114,21 +159,37 @@ def main() -> None:
         text_section_weight=float(
             retrieval_config.get("text_section_weight", 0.8)
         ),
+        mode=str(retrieval_config.get("mode", "rrf")),
     )
     logging.info("Local BM25 index is ready")
     logging.info("Entity link index contains %d reusable identifiers", len(entity_index))
-    graph = build_stage26_rag_graph(
+    graph = build_rag_graph(
+        profile,
         retriever,
         llm,
         parent_documents,
-        retrieval_config,
+        config,
         entity_index=entity_index,
+    )
+
+    prompt_texts = {
+        "planning": PLAN_PROMPT,
+        "rerank": RERANK_PROMPT,
+        "stage26_evidence": EVIDENCE_PROMPT,
+        "p0_evidence": P0_EVIDENCE_PROMPT,
+        "answer": str(ANSWER_PROMPT),
+        "answer_repair": ANSWER_REPAIR_PROMPT,
+    }
+    write_run_manifest(
+        run_dir / "run_manifest.json",
+        build_run_manifest(config, project_root=Path.cwd(), prompt_texts=prompt_texts),
     )
 
     answers_file = run_dir / "answers.jsonl"
     retrieved_file = run_dir / "retrieved_docs.jsonl"
     trace_file = run_dir / "graph_traces.jsonl"
     logging.info("Question source filter: %s", question_source_type or "all")
+    question_metrics: list[dict] = []
 
     for question in iter_questions(
         config["data"]["questions_file"],
@@ -155,7 +216,11 @@ def main() -> None:
             state.get("retrieved_docs", []),
         )
         append_graph_trace(trace_file, question_id, state)
+        question_metrics.append(
+            build_question_metrics(question_id, state, config.get("pricing", {}))
+        )
 
+    write_question_metrics_outputs(question_metrics, run_dir)
     logging.info("Wrote answers to %s", answers_file)
 
 

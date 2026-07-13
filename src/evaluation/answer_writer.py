@@ -55,6 +55,7 @@ def append_graph_trace(
     """保存规划和循环状态，不序列化大段文档正文。"""
     Path(trace_file).parent.mkdir(parents=True, exist_ok=True)
     row = {
+        "schema_version": 2,
         "question_id": question_id,
         "plan": state.get("plan", {}),
         "executed_queries": state.get("executed_queries", []),
@@ -63,6 +64,9 @@ def append_graph_trace(
         "selected_document_ids": state.get("selected_document_ids", []),
         "candidate_document_ids": list(state.get("candidate_groups", {})),
         "rerank_history": state.get("rerank_history", []),
+        "fusion_guard_history": state.get("fusion_guard_history", []),
+        "retrieval_stage_history": state.get("retrieval_stage_history", []),
+        "parent_expansion_history": state.get("parent_expansion_history", []),
         "entity_expansions": state.get("entity_expansions", []),
         "query_candidates": [
             {
@@ -100,6 +104,8 @@ def append_graph_trace(
             )
         ],
         "evidence_sufficient": state.get("evidence_sufficient", False),
+        "evidence_status": state.get("evidence_status"),
+        "judge_attempts": state.get("judge_attempts", []),
         "can_retry": state.get("can_retry", False),
         "missing_evidence": state.get("missing_evidence", []),
         "answer_repaired": state.get("answer_repaired", False),
@@ -108,6 +114,8 @@ def append_graph_trace(
             document.metadata.get("chunk_id")
             for document in state.get("answer_docs", [])
         ],
+        "model_calls": state.get("model_calls", []),
+        "node_metrics": state.get("node_metrics", []),
     }
     with Path(trace_file).open("a", encoding="utf-8") as file:
         file.write(json.dumps(row, ensure_ascii=False) + "\n")

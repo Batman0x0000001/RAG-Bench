@@ -51,6 +51,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "text_section_weight": 0.8,
         "channel_rrf_k": 60,
         "max_queries": 10,
+        "mode": "rrf",
+        "fixed_document_budget": 4,
         "query_parallelism": 3,
         "rrf_k": 60,
         "candidate_documents": 24,
@@ -62,6 +64,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_documents": 10,
         "chunks_per_document": 2,
         "rerank_chunk_chars": 800,
+        "fusion_guard_top_k": 6,
+        "fusion_guard_max_promotions": 2,
+        "fusion_guard_chunk_chars": 800,
         "max_parent_chunks": 8,
         "evidence_chunk_chars": 2500,
         "max_follow_up_queries": 2,
@@ -73,6 +78,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "graph": {
         "recursion_limit": 20,
+    },
+    "workflow": {
+        "profile": "stage26",
+    },
+    "experiment": {
+        "dataset": "github_dev",
+        "variant": "p0_full",
+        "repetitions": 3,
+    },
+    "features": {
+        "adaptive_planning": True,
+        "llm_rerank": True,
+        "fusion_rank_guard": False,
+        "parent_expansion": True,
+        "evidence_followup": True,
+        "answer_repair": True,
+    },
+    "pricing": {
+        "input_per_million": None,
+        "output_per_million": None,
     },
     "output": {
         "runs_dir": "runs",

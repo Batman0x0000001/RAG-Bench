@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -41,22 +41,25 @@ class HybridCandidateRetriever(BaseRetriever):
     candidate_k: int = 40
     rrf_k: int = 60
     text_section_weight: float = 0.8
+    mode: Literal["dense", "bm25", "rank_sum", "rrf"] = "rrf"
 
     def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
-        channel_results = {
-            "dense": self.dense_retriever.invoke(
+        channel_results: dict[str, list[Document]] = {}
+        if self.mode != "bm25":
+            channel_results["dense"] = self.dense_retriever.invoke(
                 query, config={"callbacks": run_manager.get_child()}
-            ),
-            "bm25": self.bm25_retriever.invoke(
+            )
+        if self.mode != "dense":
+            channel_results["bm25"] = self.bm25_retriever.invoke(
                 query, config={"callbacks": run_manager.get_child()}
-            ),
-        }
+            )
         scores: dict[str, float] = defaultdict(float)
         documents: dict[str, Document] = {}
         channels: dict[str, list[str]] = defaultdict(list)
         channel_ranks: dict[str, dict[str, int]] = defaultdict(dict)
 
         for channel, results in channel_results.items():
+            result_count = max(len(results), 1)
             for rank, document in enumerate(results, start=1):
                 chunk_id = str(
                     document.metadata.get("chunk_id")
@@ -67,12 +70,58 @@ class HybridCandidateRetriever(BaseRetriever):
                     if document.metadata.get("section") == "text"
                     else 1.0
                 )
-                scores[chunk_id] += section_weight / (self.rrf_k + rank)
+                if self.mode == "rank_sum":
+                    scores[chunk_id] += section_weight * (
+                        (result_count - rank + 1) / result_count
+                    )
+                else:
+                    scores[chunk_id] += section_weight / (self.rrf_k + rank)
                 documents.setdefault(chunk_id, document)
                 channels[chunk_id].append(channel)
                 channel_ranks[chunk_id][channel] = rank
 
         ordered_ids = sorted(scores, key=scores.get, reverse=True)[: self.candidate_k]
+        union_ids = list(
+            dict.fromkeys(
+                str(
+                    document.metadata.get("chunk_id")
+                    or f"{document.metadata.get('dsid', '')}::{document.page_content}"
+                )
+                for results in channel_results.values()
+                for document in results
+            )
+        )
+
+        def trace_rows(ids: list[str]) -> list[dict[str, Any]]:
+            return [
+                {
+                    "rank": rank,
+                    "chunk_id": chunk_id,
+                    "dsid": documents[chunk_id].metadata.get("dsid"),
+                }
+                for rank, chunk_id in enumerate(ids, start=1)
+                if chunk_id in documents
+            ]
+
+        retrieval_trace = {
+            "query": query,
+            "mode": self.mode,
+            "stages": {
+                channel: [
+                    {
+                        "rank": rank,
+                        "chunk_id": document.metadata.get("chunk_id"),
+                        "dsid": document.metadata.get("dsid"),
+                    }
+                    for rank, document in enumerate(results, start=1)
+                ]
+                for channel, results in channel_results.items()
+            }
+            | {
+                "union": trace_rows(union_ids),
+                "channel_fusion": trace_rows(ordered_ids),
+            },
+        }
         return [
             Document(
                 page_content=documents[chunk_id].page_content,
@@ -81,9 +130,11 @@ class HybridCandidateRetriever(BaseRetriever):
                     "retrieval_channels": channels[chunk_id],
                     "retrieval_channel_ranks": channel_ranks[chunk_id],
                     "hybrid_rrf_score": scores[chunk_id],
+                    # 只挂在第一条结果上，LangGraph 节点提取后立即移除。
+                    **({"_retrieval_trace": retrieval_trace} if index == 0 else {}),
                 },
             )
-            for chunk_id in ordered_ids
+            for index, chunk_id in enumerate(ordered_ids)
         ]
 
 
@@ -240,6 +291,7 @@ def build_hybrid_candidate_retriever(
     candidate_k: int = 40,
     rrf_k: int = 60,
     text_section_weight: float = 0.8,
+    mode: Literal["dense", "bm25", "rank_sum", "rrf"] = "rrf",
 ) -> BaseRetriever:
     return HybridCandidateRetriever(
         dense_retriever=build_candidate_retriever(
@@ -255,4 +307,5 @@ def build_hybrid_candidate_retriever(
         candidate_k=candidate_k,
         rrf_k=rrf_k,
         text_section_weight=text_section_weight,
+        mode=mode,
     )

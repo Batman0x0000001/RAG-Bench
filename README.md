@@ -19,6 +19,41 @@ Failed experiments and their executable snapshots are isolated under
 `experiments/`; historical evaluation outputs remain under `runs/`. See
 `docs/STABLE_STAGE26.md` for the stable topology and promotion rules.
 
+## P0 candidate
+
+Stage 26 remains the default. The opt-in `p0_candidate` profile adds a strict
+three-state evidence judge, stage-level retrieval traces, single-variable
+ablation presets, Gold-free question files, reproducibility manifests, and
+latency/token/cost reports. Missing model prices are reported as `null`.
+
+Prepare the development protocol without running a model:
+
+```bash
+python -m scripts.prepare_evaluation_protocol --dataset github_dev
+```
+
+Run one candidate configuration explicitly:
+
+```bash
+python -m scripts.run_benchmark --config configs/p0_candidate.yaml \
+  --workflow-profile p0_candidate --dataset github_dev --variant p0_full \
+  --run-name p0_full_github_dev_r01
+```
+
+The registered experiment runner enforces at least three repetitions and writes
+each repetition to a separate run directory:
+
+```bash
+python -m scripts.run_experiment --config configs/p0_candidate.yaml \
+  --dataset github_dev --repetitions 3 \
+  --variants p0_full dense_only bm25_only hybrid_rank_sum hybrid_rrf \
+  fixed_planning no_rerank guarded_rerank no_parent_expansion no_followup no_answer_repair
+```
+
+Do not prepare or evaluate `confluence_frozen` until the candidate configuration
+has been frozen. Benchmark execution reads only the blind question file; Gold is
+reintroduced by `scripts.evaluate --dataset ...` after all repetitions finish.
+
 ## Setup
 
 ```bash
